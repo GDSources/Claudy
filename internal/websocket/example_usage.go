@@ -57,8 +57,9 @@ func ExampleUsage(jwtService *auth.JWTService) *Handler {
 		PingInterval:         54 * time.Second,
 	}
 
-	// Create handler
-	handler := NewHandler(jwtService, redisService, config)
+	// For this example, we'll use nil for file manager and session manager
+	// In real usage, you would inject proper implementations
+	handler := NewHandler(jwtService, redisService, nil, nil, config)
 
 	// In your HTTP server setup:
 	// http.HandleFunc("/ws", handler.HandleWebSocket)

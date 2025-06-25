@@ -12,12 +12,68 @@ This document outlines the comprehensive Test-Driven Development (TDD) methodolo
 4. 🔄 REPEAT → Continue with next feature/edge case
 ```
 
-### Implementation Sequence
-1. **Write the test** - Define expected behavior before implementation
-2. **Run the test** - Confirm it fails (validates test is actually testing)
-3. **Write minimal code** - Just enough to make the test pass
-4. **Refactor** - Improve code quality without changing behavior
-5. **Repeat** - Move to next test case
+## Human Validation Requirements
+
+**MANDATORY**: All TDD development must include human validation at critical checkpoints. Agents MUST NOT proceed without explicit human approval.
+
+### Test Review Requirement
+- **Before any implementation**: Present ALL planned tests for human review and approval
+- **Test structure review**: Validate test organization, coverage, and edge cases
+- **Acceptance criteria**: Confirm tests match requirements and cover all scenarios
+- **No implementation without approval**: Agents must wait for explicit "proceed" instruction
+
+### Single-Test Validation Cycle
+- **After each test implementation**: Present test + implementation + refactoring for validation
+- **Human checkpoint**: Request approval before proceeding to next test
+- **Validation format**: Show test code, implementation code, test results, and refactoring changes
+- **Iterative approval**: Each test-implement-refactor cycle requires separate approval
+
+### Quality Validation Points
+- **Test quality review**: Ensure test properly validates expected behavior
+- **Implementation review**: Verify minimal, clean implementation
+- **Refactoring review**: Confirm improvements don't break functionality
+- **Progress validation**: Confirm overall progress aligns with requirements
+
+## Single-Test Implementation Cycle
+
+**CRITICAL**: Implement ONE test at a time with human validation at each step.
+
+### Phase 1: Test Planning and Approval
+1. **Define all tests** - List every test with clear descriptions
+2. **Present for review** - Show complete test plan to human
+3. **Wait for approval** - DO NOT proceed without explicit approval
+4. **Clarify requirements** - Address any human feedback or questions
+
+### Phase 2: Single-Test Cycle (Repeat for Each Test)
+1. **🔴 RED** - Write one failing test
+   - Write ONLY the current test
+   - Run test to confirm it fails
+   - Present test code and failure output
+   - **STOP - Request approval to implement**
+
+2. **🟢 GREEN** - Implement minimal code
+   - Write minimal code to make ONLY this test pass
+   - Run test to confirm it passes
+   - Run all previous tests to ensure no regression
+   - Present implementation code and test results
+   - **STOP - Request approval to refactor**
+
+3. **🔵 REFACTOR** - Improve code quality
+   - Clean up code while keeping all tests passing
+   - Run all tests to confirm no regression
+   - Present refactored code and test results
+   - **STOP - Request approval for next test**
+
+4. **🔄 VALIDATE** - Human checkpoint
+   - Present complete cycle results
+   - Wait for approval to proceed to next test
+   - Address any feedback or required changes
+
+### Phase 3: Completion Validation
+1. **Final review** - Present all implemented tests and code
+2. **Integration check** - Verify all tests pass together
+3. **Quality assessment** - Confirm implementation meets requirements
+4. **Human sign-off** - Receive final approval for phase completion
 
 ## Phase-Based Development Structure
 
@@ -41,6 +97,72 @@ For each development phase, define:
    - Security requirements
    - Performance criteria
    - Integration points
+
+## Validation Protocols
+
+### When to Request Human Review
+**MANDATORY review points:**
+- Before implementing any tests (complete test plan review)
+- After writing each individual test (before implementation)
+- After implementing code for each test (before refactoring)
+- After refactoring each test (before next test)
+- Upon completion of all tests in a phase
+- When encountering unexpected issues or errors
+- When test requirements are unclear or ambiguous
+
+### Validation Request Format
+```markdown
+## Test Validation Request
+
+**Current Test**: [Test name and description]
+**Phase**: [Current phase - RED/GREEN/REFACTOR]
+**Progress**: [X of Y tests completed]
+
+### Test Code
+```go
+[Show the current test code]
+```
+
+### Implementation Code (if GREEN/REFACTOR phase)
+```go
+[Show the minimal implementation or refactored code]
+```
+
+### Test Results
+```
+[Show test execution output - failures for RED, passes for GREEN/REFACTOR]
+```
+
+### Changes Made
+- [Bullet points of what was implemented or refactored]
+
+### Next Step
+[What you plan to do next - implement/refactor/next test]
+
+**Awaiting approval to proceed**
+```
+
+### Quality Criteria for Approval
+**Test Quality:**
+- [ ] Test clearly validates expected behavior
+- [ ] Test includes proper setup and teardown
+- [ ] Test has meaningful assertions
+- [ ] Test covers edge cases appropriately
+- [ ] Test is isolated and doesn't depend on other tests
+
+**Implementation Quality:**
+- [ ] Minimal code that makes test pass
+- [ ] No unnecessary complexity
+- [ ] Proper error handling
+- [ ] Follows coding standards
+- [ ] No breaking changes to existing functionality
+
+**Refactoring Quality:**
+- [ ] Code readability improved
+- [ ] Performance maintained or improved
+- [ ] All tests still pass
+- [ ] No new technical debt introduced
+- [ ] Architecture patterns followed
 
 ### Test Categories Per Phase
 
@@ -305,6 +427,11 @@ func (s *Service) ProcessRequest(req *Request) error {
 ## Best Practices
 
 ### Do:
+- **Request human validation** at every mandatory checkpoint
+- **Present complete test plans** before any implementation
+- **Implement one test at a time** with approval between each
+- **Show all code and results** in validation requests
+- **Wait for explicit approval** before proceeding
 - Write tests before implementation
 - Test both happy path and edge cases
 - Use real services for integration tests
@@ -315,6 +442,11 @@ func (s *Service) ProcessRequest(req *Request) error {
 - Document test requirements clearly
 
 ### Don't:
+- **Proceed without human approval** at validation checkpoints
+- **Implement multiple tests** without validation between them
+- **Skip validation requests** or assume approval
+- **Hide failures or issues** from human reviewer
+- **Rush through validation** without proper presentation
 - Skip edge case testing
 - Mock everything in integration tests
 - Ignore performance implications
@@ -323,5 +455,51 @@ func (s *Service) ProcessRequest(req *Request) error {
 - Assume external services are reliable
 - Ignore race conditions
 - Skip error handling tests
+
+## Agent Instructions for TDD Implementation
+
+### MANDATORY Protocol for All Agents
+1. **NEVER implement without test plan approval**
+2. **ALWAYS implement one test at a time**
+3. **ALWAYS request validation after each RED-GREEN-REFACTOR cycle**
+4. **NEVER proceed to next test without explicit approval**
+5. **ALWAYS present complete code and results in validation requests**
+6. **STOP development if validation is not received**
+
+### Validation Request Template for Agents
+Use this exact format for all validation requests:
+
+```markdown
+🔴/🟢/🔵 **[PHASE] Validation Request**
+
+**Test**: `[TestName]` ([X] of [Y] total tests)
+**Status**: [RED - test written | GREEN - implementation complete | REFACTOR - code improved]
+
+**Test Code**:
+```go
+[test code here]
+```
+
+**Implementation** (if GREEN/REFACTOR):
+```go
+[implementation code here]
+```
+
+**Results**:
+```
+[test execution output]
+```
+
+**Summary**: [Brief description of what was accomplished]
+**Next**: [What will be done after approval]
+
+**⏸️ Awaiting human approval to proceed**
+```
+
+### Enforcement
+- Agents that proceed without validation will have their work rejected
+- All validation checkpoints are mandatory, not optional
+- Human approval must be explicit ("proceed", "approved", "continue")
+- Silence or delay does not constitute approval
 
 This TDD methodology ensures robust, secure, and maintainable code by systematically testing all scenarios before implementation, resulting in production-ready software with comprehensive edge case coverage.

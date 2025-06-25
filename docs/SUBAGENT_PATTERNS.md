@@ -26,11 +26,13 @@ Subagent delegation allows breaking down complex development tasks into focused,
 - Reference relevant PRD requirements and constraints
 - Specify integration points with existing components
 
-### 3. Test-Driven Requirements
-- **Mandate TDD approach explicitly**
-- Require tests to be written before implementation
+### 3. Test-Driven Requirements with Human Validation
+- **Mandate TDD approach explicitly** with human validation checkpoints
+- Require tests to be written before implementation WITH human approval
 - Specify exact number and types of tests needed
 - Include both happy path and comprehensive edge cases
+- **ENFORCE single-test implementation cycle** with validation after each test
+- **REQUIRE human approval** before proceeding between tests
 
 ### 4. Standardized Reporting
 - **Require consistent reporting format**
@@ -68,7 +70,10 @@ Edge Cases & Error Tests:
 
 **Implementation requirements:**
 - [Specific technical requirements]
-- Follow TDD: Write failing tests first, then implement minimal code to pass
+- **MANDATORY**: Follow TDD methodology from @docs/TDD_METHODOLOGY.md
+- **CRITICAL**: Present ALL planned tests for human approval before ANY implementation
+- **REQUIRED**: Implement ONE test at a time with human validation after each RED-GREEN-REFACTOR cycle
+- **STOP**: Request human approval before proceeding to next test
 - Handle all error cases gracefully without panics
 - [Security/integration/performance requirements]
 - Use mocks for external dependencies (specify what to mock)
@@ -85,9 +90,20 @@ Edge Cases & Error Tests:
 - [Security requirements to implement]
 - [Performance targets to meet]
 
-Create the test files first, run them to see failures, then implement [component] to make all tests pass. [Additional specific instructions]
+**IMPLEMENTATION PROCESS:**
+1. **FIRST**: Present complete test plan for human approval
+2. **THEN**: Implement ONE test at a time following TDD methodology
+3. **AFTER EACH TEST**: Request human validation using the format from @docs/TDD_METHODOLOGY.md
+4. **ONLY PROCEED**: After receiving explicit human approval for each test
+5. **NEVER**: Implement multiple tests without validation checkpoints
 
-Return a summary of what was implemented and the test results.
+**VALIDATION REQUIREMENTS:**
+- Use the validation request template from @docs/TDD_METHODOLOGY.md
+- Show test code, implementation code, and results for each cycle
+- Wait for explicit "proceed" or "approved" response
+- Address any human feedback before continuing
+
+Return a summary of what was implemented and the test results ONLY after completing the full validation cycle for all tests.
 ```
 
 ## Successful Phase Examples

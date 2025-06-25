@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"claudy/internal/auth"
+	"claudy/internal/files"
+	"claudy/internal/session"
 )
 
 // MockJWTService implements a mock JWT service for testing
@@ -65,8 +68,54 @@ func (m *MockRedisService) IsAvailable() bool {
 	return args.Bool(0)
 }
 
+// MockFileManager implements a mock file manager for testing
+type MockFileManager struct {
+	mock.Mock
+}
+
+func (m *MockFileManager) UploadFile(ctx context.Context, workspacePath, filename, content, encoding string) (*files.UploadResult, error) {
+	args := m.Called(ctx, workspacePath, filename, content, encoding)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*files.UploadResult), args.Error(1)
+}
+
+func (m *MockFileManager) ListFiles(ctx context.Context, workspacePath string) ([]files.FileInfo, error) {
+	args := m.Called(ctx, workspacePath)
+	return args.Get(0).([]files.FileInfo), args.Error(1)
+}
+
+func (m *MockFileManager) CleanupWorkspace(ctx context.Context, workspacePath string) error {
+	args := m.Called(ctx, workspacePath)
+	return args.Error(0)
+}
+
+func (m *MockFileManager) GetWorkspaceSize(ctx context.Context, workspacePath string) (int64, error) {
+	args := m.Called(ctx, workspacePath)
+	return args.Get(0).(int64), args.Error(1)
+}
+
+// MockSessionManager implements a mock session manager for testing
+type MockSessionManager struct {
+	mock.Mock
+}
+
+func (m *MockSessionManager) GetSession(sessionID string) *session.ClaudeSession {
+	args := m.Called(sessionID)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*session.ClaudeSession)
+}
+
+func (m *MockSessionManager) GetUserSessions(userID string) []string {
+	args := m.Called(userID)
+	return args.Get(0).([]string)
+}
+
 // Helper function to create a test WebSocket handler
-func createTestHandler(jwtService JWTService, redisService RedisService) *Handler {
+func createTestHandler(jwtService JWTService, redisService RedisService, fileManager FileManagerInterface, sessionManager SessionManagerInterface) *Handler {
 	config := Config{
 		MaxConnectionsPerUser: 3,
 		AllowedOrigins:       []string{"http://localhost:3000", "https://claudy.example.com"},
@@ -74,7 +123,7 @@ func createTestHandler(jwtService JWTService, redisService RedisService) *Handle
 		WriteTimeout:         30 * time.Second,
 		PingInterval:         54 * time.Second,
 	}
-	return NewHandler(jwtService, redisService, config)
+	return NewHandler(jwtService, redisService, fileManager, sessionManager, config)
 }
 
 // Helper function to create a test WebSocket client
@@ -116,7 +165,7 @@ func TestWebSocketConnectionEstablishment(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
@@ -146,6 +195,8 @@ func TestWebSocketConnectionEstablishment(t *testing.T) {
 func TestWebSocketJWTAuthentication(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
+	mockFileManager := &MockFileManager{}
+	mockSessionManager := &MockSessionManager{}
 	
 	// Setup mocks
 	validClaims := createValidUserClaims()
@@ -156,7 +207,7 @@ func TestWebSocketJWTAuthentication(t *testing.T) {
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, mockFileManager, mockSessionManager)
 	
 	// Create connection with valid origin
 	headers := http.Header{
@@ -196,7 +247,7 @@ func TestWebSocketConnectionWithoutJWT(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
@@ -235,7 +286,7 @@ func TestWebSocketConnectionWithExpiredJWT(t *testing.T) {
 	expiredToken := "expired-jwt-token"
 	mockJWT.On("ValidateToken", expiredToken).Return(nil, fmt.Errorf("token expired"))
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
@@ -266,7 +317,7 @@ func TestWebSocketMessageBeforeAuthentication(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
@@ -304,7 +355,7 @@ func TestWebSocketConnectionDropDuringAuthentication(t *testing.T) {
 	// Setup mocks - we expect the ValidateToken to be called but we'll close before completion
 	mockJWT.On("ValidateToken", "some-token").Return(nil, fmt.Errorf("connection closed"))
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
@@ -333,7 +384,7 @@ func TestWebSocketMalformedMessageHandling(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
@@ -376,7 +427,7 @@ func TestWebSocketMaxConnectionsPerUser(t *testing.T) {
 	// First connection will decrement when it closes
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil).Once()
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	// Create first connection (should succeed)
 	headers := http.Header{
@@ -436,7 +487,7 @@ func TestWebSocketRedisUnavailableDuringConnection(t *testing.T) {
 	mockRedis.On("IsAvailable").Return(true)
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(0, fmt.Errorf("redis connection failed"))
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
@@ -481,7 +532,7 @@ func TestWebSocketConcurrentConnectionsFromSameUser(t *testing.T) {
 	// Cleanup
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(1, nil).Times(2)
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -552,7 +603,7 @@ func TestWebSocketOriginValidation(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
@@ -598,7 +649,7 @@ func TestWebSocketConnectionCleanupOnProcessExit(t *testing.T) {
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 	
-	handler := createTestHandler(mockJWT, mockRedis)
+	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},

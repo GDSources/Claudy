@@ -1,6 +1,8 @@
 package websocket
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"claudy/internal/auth"
+	"claudy/internal/files"
+	"claudy/internal/session"
 )
 
 // Message represents the WebSocket message protocol
@@ -34,6 +38,21 @@ type RedisService interface {
 	IsAvailable() bool
 }
 
+// FileManager interface for file operations
+type FileManagerInterface interface {
+	UploadFile(ctx context.Context, workspacePath, filename, content, encoding string) (*files.UploadResult, error)
+	ListFiles(ctx context.Context, workspacePath string) ([]files.FileInfo, error)
+	CleanupWorkspace(ctx context.Context, workspacePath string) error
+	GetWorkspaceSize(ctx context.Context, workspacePath string) (int64, error)
+}
+
+// SessionManager interface for session management
+type SessionManagerInterface interface {
+	GetSession(sessionID string) *session.ClaudeSession
+	GetUserSessions(userID string) []string
+}
+
+
 // Config holds WebSocket handler configuration
 type Config struct {
 	MaxConnectionsPerUser int
@@ -55,18 +74,20 @@ type Connection struct {
 
 // Handler manages WebSocket connections
 type Handler struct {
-	jwtService   JWTService
-	redisService RedisService
-	config       Config
-	connections  map[string][]*Connection
-	upgrader     websocket.Upgrader
-	mutex        sync.RWMutex
-	shutdown     chan struct{}
-	shutdownOnce sync.Once
+	jwtService     JWTService
+	redisService   RedisService
+	fileManager    FileManagerInterface
+	sessionManager SessionManagerInterface
+	config         Config
+	connections    map[string][]*Connection
+	upgrader       websocket.Upgrader
+	mutex          sync.RWMutex
+	shutdown       chan struct{}
+	shutdownOnce   sync.Once
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler(jwtService JWTService, redisService RedisService, config Config) *Handler {
+func NewHandler(jwtService JWTService, redisService RedisService, fileManager FileManagerInterface, sessionManager SessionManagerInterface, config Config) *Handler {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -86,12 +107,14 @@ func NewHandler(jwtService JWTService, redisService RedisService, config Config)
 	}
 
 	return &Handler{
-		jwtService:   jwtService,
-		redisService: redisService,
-		config:       config,
-		connections:  make(map[string][]*Connection),
-		upgrader:     upgrader,
-		shutdown:     make(chan struct{}),
+		jwtService:     jwtService,
+		redisService:   redisService,
+		fileManager:    fileManager,
+		sessionManager: sessionManager,
+		config:         config,
+		connections:    make(map[string][]*Connection),
+		upgrader:       upgrader,
+		shutdown:       make(chan struct{}),
 	}
 }
 
@@ -216,6 +239,10 @@ func (c *Connection) handleMessage(msg Message) {
 		c.handleChatMessage(msg)
 	case "file_upload":
 		c.handleFileUpload(msg)
+	case "file_list":
+		c.handleFileList(msg)
+	case "workspace_info":
+		c.handleWorkspaceInfo(msg)
 	default:
 		c.sendError("unknown message type: " + msg.Type)
 	}
@@ -292,12 +319,136 @@ func (c *Connection) handleChatMessage(msg Message) {
 
 // handleFileUpload processes file upload messages
 func (c *Connection) handleFileUpload(msg Message) {
-	// Placeholder implementation
+	c.mutex.RLock()
+	userID := c.userID
+	c.mutex.RUnlock()
+
+	// Parse file upload data
+	var fileData files.FileUploadMessage
+	if dataBytes, err := json.Marshal(msg.Data); err != nil {
+		c.sendError("invalid file upload data format")
+		return
+	} else if err := json.Unmarshal(dataBytes, &fileData); err != nil {
+		c.sendError("failed to parse file upload data")
+		return
+	}
+
+	// Get user's active session to find workspace
+	sessionIDs := c.handler.sessionManager.GetUserSessions(userID)
+	if len(sessionIDs) == 0 {
+		c.sendError("no active session found - please start a Claude Code session first")
+		return
+	}
+
+	// Use the first active session (in a real implementation, you might want to specify which session)
+	session := c.handler.sessionManager.GetSession(sessionIDs[0])
+	if session == nil {
+		c.sendError("session not found")
+		return
+	}
+
+	// Upload file to workspace
+	ctx := context.Background()
+	result, err := c.handler.fileManager.UploadFile(ctx, session.WorkspacePath, fileData.Filename, fileData.Content, fileData.Encoding)
+	if err != nil {
+		c.sendError("file upload failed: " + err.Error())
+		return
+	}
+
+	// Send success response
 	response := Message{
-		Type:      "session_status",
-		Content:   "file upload received",
+		Type:      "file_uploaded",
+		Content:   "file uploaded successfully",
 		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      map[string]interface{}{},
+		Data: map[string]interface{}{
+			"filename": result.Filename,
+			"size":     result.Size,
+			"path":     result.Path,
+		},
+	}
+	c.sendMessage(response)
+
+	log.Printf("File uploaded: %s (%d bytes) to workspace %s", result.Filename, result.Size, session.WorkspacePath)
+}
+
+// handleFileList processes file listing requests
+func (c *Connection) handleFileList(msg Message) {
+	c.mutex.RLock()
+	userID := c.userID
+	c.mutex.RUnlock()
+
+	// Get user's active session to find workspace
+	sessionIDs := c.handler.sessionManager.GetUserSessions(userID)
+	if len(sessionIDs) == 0 {
+		c.sendError("no active session found")
+		return
+	}
+
+	session := c.handler.sessionManager.GetSession(sessionIDs[0])
+	if session == nil {
+		c.sendError("session not found")
+		return
+	}
+
+	// List files in workspace
+	ctx := context.Background()
+	fileList, err := c.handler.fileManager.ListFiles(ctx, session.WorkspacePath)
+	if err != nil {
+		c.sendError("failed to list files: " + err.Error())
+		return
+	}
+
+	// Send file list response
+	response := Message{
+		Type:      "file_list",
+		Content:   "file list retrieved successfully",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Data: map[string]interface{}{
+			"files":          fileList,
+			"workspace_path": session.WorkspacePath,
+		},
+	}
+	c.sendMessage(response)
+}
+
+// handleWorkspaceInfo processes workspace information requests
+func (c *Connection) handleWorkspaceInfo(msg Message) {
+	c.mutex.RLock()
+	userID := c.userID
+	c.mutex.RUnlock()
+
+	// Get user's active session to find workspace
+	sessionIDs := c.handler.sessionManager.GetUserSessions(userID)
+	if len(sessionIDs) == 0 {
+		c.sendError("no active session found")
+		return
+	}
+
+	session := c.handler.sessionManager.GetSession(sessionIDs[0])
+	if session == nil {
+		c.sendError("session not found")
+		return
+	}
+
+	// Get workspace size
+	ctx := context.Background()
+	workspaceSize, err := c.handler.fileManager.GetWorkspaceSize(ctx, session.WorkspacePath)
+	if err != nil {
+		c.sendError("failed to get workspace info: " + err.Error())
+		return
+	}
+
+	// Send workspace info response
+	response := Message{
+		Type:      "workspace_info",
+		Content:   "workspace info retrieved successfully",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Data: map[string]interface{}{
+			"workspace_path": session.WorkspacePath,
+			"size_bytes":     workspaceSize,
+			"size_mb":        float64(workspaceSize) / (1024 * 1024),
+			"max_size_mb":    float64(files.MaxWorkspaceSize) / (1024 * 1024),
+		},
 	}
 	c.sendMessage(response)
 }

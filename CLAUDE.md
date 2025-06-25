@@ -4,7 +4,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-<<<<<<< HEAD
 Claudy is a **production-ready Go-based backend service** that enables remote access to Claude Code sessions through a secure WebSocket interface. The backend is fully implemented with comprehensive authentication, session management, file handling, and real-time communication capabilities.
 
 **Status**: ✅ Complete implementation (6 phases, 66 test cases, 100% pass rate)

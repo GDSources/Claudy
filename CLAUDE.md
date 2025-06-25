@@ -4,6 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
+<<<<<<< HEAD
 Claudy is a **production-ready Go-based backend service** that enables remote access to Claude Code sessions through a secure WebSocket interface. The backend is fully implemented with comprehensive authentication, session management, file handling, and real-time communication capabilities.
 
 **Status**: ✅ Complete implementation (6 phases, 66 test cases, 100% pass rate)
@@ -285,3 +286,10 @@ The system is ready for frontend integration and deployment to production enviro
 - **Git Workflow**: See `docs/GITFLOW.md`
 - **Subagent Patterns**: See `docs/SUBAGENT_PATTERNS.md`
 - **Product Requirements**: See `PRD.md`
+
+## Code Guidelines
+
+- Always use the return early pattern
+- Follow comprehensive TDD methodology
+- Maintain 100% test coverage for critical paths
+- Use dependency injection for testability

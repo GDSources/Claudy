@@ -52,6 +52,7 @@ type SessionManagerInterface interface {
 	GetUserSessions(userID string) []string
 }
 
+
 // Config holds WebSocket handler configuration
 type Config struct {
 	MaxConnectionsPerUser int

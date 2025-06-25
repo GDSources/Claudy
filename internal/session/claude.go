@@ -129,6 +129,7 @@ type ClaudeSessionManager struct {
 	userMutex        sync.RWMutex
 	cleanupTicker    *time.Ticker
 	stopCleanup      chan struct{}
+	stopOnce         sync.Once
 }
 
 // NewClaudeSessionManager creates a new session manager instance
@@ -418,19 +419,21 @@ func (c *ClaudeSessionManager) startCleanupRoutine() {
 
 // Stop stops the session manager and cleans up resources
 func (c *ClaudeSessionManager) Stop(ctx context.Context) error {
-	close(c.stopCleanup)
+	c.stopOnce.Do(func() {
+		close(c.stopCleanup)
 
-	// Terminate all active sessions
-	c.mutex.RLock()
-	sessionIDs := make([]string, 0, len(c.sessions))
-	for sessionID := range c.sessions {
-		sessionIDs = append(sessionIDs, sessionID)
-	}
-	c.mutex.RUnlock()
+		// Terminate all active sessions
+		c.mutex.RLock()
+		sessionIDs := make([]string, 0, len(c.sessions))
+		for sessionID := range c.sessions {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+		c.mutex.RUnlock()
 
-	for _, sessionID := range sessionIDs {
-		c.TerminateSession(ctx, sessionID)
-	}
+		for _, sessionID := range sessionIDs {
+			c.TerminateSession(ctx, sessionID)
+		}
+	})
 
 	return nil
 }

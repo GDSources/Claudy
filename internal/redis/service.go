@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -10,8 +11,16 @@ import (
 
 // Service provides Redis operations for the application
 type Service struct {
-	client *redis.Client
-	ctx    context.Context
+	client        *redis.Client
+	ctx           context.Context
+	
+	// Connection state tracking
+	addr         string
+	password     string
+	db           int
+	isConnected  bool
+	lastPingTime time.Time
+	reconnectMux sync.Mutex
 }
 
 // NewService creates a new Redis service instance
@@ -27,16 +36,90 @@ func NewService(addr, password string, db int) *Service {
 		MinIdleConns: 2,
 	})
 
-	return &Service{
-		client: rdb,
-		ctx:    context.Background(),
+	service := &Service{
+		client:       rdb,
+		ctx:          context.Background(),
+		addr:         addr,
+		password:     password,
+		db:           db,
+		isConnected:  false,
+		lastPingTime: time.Time{},
 	}
+	
+	// Test initial connection
+	service.testConnection()
+	
+	return service
 }
 
-// IsAvailable checks if Redis service is available
+// testConnection tests the current connection and updates state
+func (s *Service) testConnection() bool {
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	defer cancel()
+	
+	_, err := s.client.Ping(ctx).Result()
+	s.isConnected = err == nil
+	if s.isConnected {
+		s.lastPingTime = time.Now()
+	}
+	return s.isConnected
+}
+
+// reconnect attempts to reconnect to Redis with exponential backoff
+func (s *Service) reconnect() bool {
+	s.reconnectMux.Lock()
+	defer s.reconnectMux.Unlock()
+	
+	// Double-check if someone else already reconnected
+	if s.testConnection() {
+		return true
+	}
+	
+	// Close existing client
+	if s.client != nil {
+		s.client.Close()
+	}
+	
+	// Create new client with exponential backoff
+	maxRetries := 3
+	backoff := 100 * time.Millisecond
+	
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			time.Sleep(backoff)
+			backoff *= 2 // Exponential backoff
+		}
+		
+		s.client = redis.NewClient(&redis.Options{
+			Addr:         s.addr,
+			Password:     s.password,
+			DB:           s.db,
+			DialTimeout:  5 * time.Second,
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+			PoolSize:     10,
+			MinIdleConns: 2,
+		})
+		
+		if s.testConnection() {
+			return true
+		}
+	}
+	
+	return false
+}
+
+// IsAvailable checks if Redis service is available and attempts reconnection if needed
 func (s *Service) IsAvailable() bool {
-	_, err := s.client.Ping(s.ctx).Result()
-	return err == nil
+	// If we haven't pinged recently or last ping failed, test connection
+	if !s.isConnected || time.Since(s.lastPingTime) > 30*time.Second {
+		if !s.testConnection() {
+			// Connection failed, attempt reconnection
+			return s.reconnect()
+		}
+	}
+	
+	return s.isConnected
 }
 
 // IncrementConnectionCount increments the connection count for a user

@@ -618,9 +618,17 @@ func TestRedisFailoverDuringWebSocket(t *testing.T) {
 	// Wait for Redis to be ready
 	time.Sleep(2 * time.Second)
 
+	// Get new Redis connection string after restart
+	redisEndpoint, err := framework.redisContainer.Endpoint(ctx, "")
+	require.NoError(t, err)
+	framework.redisAddr = redisEndpoint
+
 	// Recreate Redis service
 	framework.redisService.Close()
 	framework.redisService = redisService.NewService(framework.redisAddr, "", 0)
+	
+	// Update WebSocket handler to use new Redis service
+	framework.wsHandler.UpdateRedisService(framework.redisService)
 
 	// New connections should work again
 	header3 := http.Header{}

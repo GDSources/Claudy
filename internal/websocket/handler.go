@@ -545,3 +545,10 @@ func (h *Handler) Shutdown() {
 		log.Println("WebSocket handler shut down gracefully")
 	})
 }
+
+// UpdateRedisService updates the Redis service reference (useful for testing scenarios)
+func (h *Handler) UpdateRedisService(redisService RedisService) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.redisService = redisService
+}

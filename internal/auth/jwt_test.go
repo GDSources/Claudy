@@ -163,7 +163,9 @@ func TestJWTValidationWithTamperedToken(t *testing.T) {
 	// Validation should fail
 	_, err = jwtService.ValidateToken(tamperedToken)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "signature")
+	if err != nil {
+		assert.Contains(t, err.Error(), "signature")
+	}
 }
 
 // TestJWTValidationWithExpiredToken - Reject expired tokens

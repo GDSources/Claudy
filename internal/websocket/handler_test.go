@@ -1,3 +1,48 @@
+// Package websocket provides comprehensive unit tests for WebSocket functionality.
+//
+// # Test Architecture
+//
+// This test suite uses modern Go testing patterns for maintainability and readability:
+//
+// ## Mock Builder Pattern
+//
+// Use NewMockSetup() to configure test dependencies with a fluent interface:
+//
+//	handler, mocks... := NewMockSetup().
+//		WithValidJWT().
+//		WithRedisConnectionLimit(1).
+//		WithRedisConnectionOps().
+//		Build()
+//
+// ## Options Pattern for Test Clients
+//
+// Use CreateTestClient() with functional options for flexible connection testing:
+//
+//	// Successful authenticated connection
+//	conn, server, err := CreateTestClient(t, handler, WithToken(validJWTToken))
+//
+//	// Test connection failure
+//	conn, server, err := CreateTestClient(t, handler, WithExpectFailure())
+//
+//	// Custom headers
+//	conn, server, err := CreateTestClient(t, handler, 
+//		WithToken(token), 
+//		WithHeaders(customHeaders))
+//
+// ## Test Data Factories
+//
+// Use TestDataFactory for consistent test data creation:
+//
+//	factory := NewTestDataFactory()
+//	user := factory.CreateUser()
+//	message := factory.CreateChatMessage("test content")
+//	session := factory.CreateSession(userID, workspacePath)
+//
+// ## Authentication Flow
+//
+// All WebSocket connections now require pre-upgrade authentication via JWT tokens.
+// Tokens must be provided as query parameters (?token=...) during the handshake.
+//
 package websocket
 
 import (
@@ -14,10 +59,32 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"claudy/internal/auth"
 	"claudy/internal/files"
 	"claudy/internal/session"
+)
+
+// Test constants for consistent values across test suite
+const (
+	// Connection constants
+	testOrigin          = "http://localhost:3000"
+	maliciousOrigin     = "https://malicious-site.com"
+	validJWTToken       = "valid-jwt-token"
+	expiredJWTToken     = "expired-jwt-token"
+	invalidJWTToken     = "invalid-jwt-token"
+	
+	// User constants  
+	testUserID          = "user123"
+	testGitHubID        = "github123"
+	testUsername        = "testuser"
+	
+	// File constants
+	testFileName        = "test.py"
+	testFileContent     = "print('Hello World')"
+	testFileEncoding    = "utf-8"
+	testWorkspacePath   = "/test/workspace/user123"
 )
 
 // MockJWTService implements a mock JWT service for testing
@@ -126,91 +193,327 @@ func createTestHandler(jwtService JWTService, redisService RedisService, fileMan
 	return NewHandler(jwtService, redisService, fileManager, sessionManager, config)
 }
 
-// Helper function to create a test WebSocket client with authentication
-func createTestClient(t *testing.T, handler *Handler, headers http.Header, token string) (*websocket.Conn, *httptest.Server) {
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	
-	// Convert http://... to ws://...
-	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws"
-	
-	// Add token as query parameter if provided
-	if token != "" {
-		wsURL += "?token=" + token
-	}
-	
-	dialer := websocket.Dialer{}
-	conn, _, err := dialer.Dial(wsURL, headers)
-	require.NoError(t, err)
-	
-	return conn, server
+// TestClientOption defines functional options for test client creation
+type TestClientOption func(*testClientConfig)
+
+// testClientConfig holds configuration for test client creation
+type testClientConfig struct {
+	token         string
+	expectFailure bool
+	headers       http.Header
 }
 
-// Helper function to create a test WebSocket client without authentication (for negative tests)
-func createTestClientNoAuth(t *testing.T, handler *Handler, headers http.Header) (*websocket.Conn, *httptest.Server, error) {
+// WithToken sets the JWT token for authentication
+func WithToken(token string) TestClientOption {
+	return func(cfg *testClientConfig) {
+		cfg.token = token
+	}
+}
+
+// WithExpectFailure indicates the connection should fail
+func WithExpectFailure() TestClientOption {
+	return func(cfg *testClientConfig) {
+		cfg.expectFailure = true
+	}
+}
+
+// WithHeaders sets custom headers for the connection
+func WithHeaders(headers http.Header) TestClientOption {
+	return func(cfg *testClientConfig) {
+		cfg.headers = headers
+	}
+}
+
+// CreateTestClient creates a WebSocket test client with configurable options
+func CreateTestClient(t *testing.T, handler *Handler, options ...TestClientOption) (*websocket.Conn, *httptest.Server, error) {
+	// Default configuration
+	cfg := &testClientConfig{
+		headers: http.Header{
+			"Origin": []string{"http://localhost:3000"},
+		},
+	}
+	
+	// Apply options
+	for _, opt := range options {
+		opt(cfg)
+	}
+	
+	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
 	
-	// Convert http://... to ws://...
+	// Build WebSocket URL
 	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws"
+	if cfg.token != "" {
+		wsURL += "?token=" + cfg.token
+	}
 	
+	// Attempt connection
 	dialer := websocket.Dialer{}
-	conn, resp, err := dialer.Dial(wsURL, headers)
+	conn, resp, err := dialer.Dial(wsURL, cfg.headers)
 	
-	// For tests that expect failure, return the error
+	// Handle response cleanup
 	if err != nil && resp != nil {
 		resp.Body.Close()
 	}
 	
+	// Validate expectations
+	if cfg.expectFailure {
+		if err == nil {
+			t.Errorf("Expected connection to fail, but it succeeded")
+			if conn != nil {
+				conn.Close()
+			}
+		}
+	} else {
+		require.NoError(t, err, "Expected connection to succeed")
+	}
+	
+	return conn, server, err
+}
+
+// Legacy helpers for backward compatibility - to be replaced gradually
+func createTestClient(t *testing.T, handler *Handler, headers http.Header, token string) (*websocket.Conn, *httptest.Server) {
+	conn, server, err := CreateTestClient(t, handler, WithToken(token), WithHeaders(headers))
+	require.NoError(t, err)
+	return conn, server
+}
+
+func createTestClientNoAuth(handler *Handler, headers http.Header) (*websocket.Conn, *httptest.Server, error) {
+	// Note: Ignoring t parameter for now to maintain compatibility
+	conn, server, err := CreateTestClient(nil, handler, WithHeaders(headers), WithExpectFailure())
 	return conn, server, err
 }
 
 // Helper function to create valid user claims
 func createValidUserClaims() *auth.UserClaims {
 	return &auth.UserClaims{
-		UserID:   "user123",
-		GitHubID: "github123",
-		Username: "testuser",
+		UserID:   testUserID,
+		GitHubID: testGitHubID,
+		Username: testUsername,
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 }
 
-// Helper function to create an auth message
-func createAuthMessage(token string) Message {
-	return Message{
-		Type:      "auth",
-		Content:   token,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      map[string]interface{}{},
+// MockSetup provides a builder pattern for configuring test mocks
+type MockSetup struct {
+	jwt            *MockJWTService
+	redis          *MockRedisService
+	fileManager    *MockFileManager
+	sessionManager *MockSessionManager
+	userClaims     *auth.UserClaims
+	token          string
+}
+
+// NewMockSetup creates a new mock setup builder
+func NewMockSetup() *MockSetup {
+	return &MockSetup{
+		jwt:            &MockJWTService{},
+		redis:          &MockRedisService{},
+		fileManager:    &MockFileManager{},
+		sessionManager: &MockSessionManager{},
+		userClaims:     createValidUserClaims(),
+		token:          validJWTToken,
 	}
 }
 
-// TestWebSocketConnectionEstablishment tests successful WebSocket connection upgrade with authentication
-func TestWebSocketConnectionEstablishment(t *testing.T) {
-	mockJWT := &MockJWTService{}
-	mockRedis := &MockRedisService{}
-	
-	// Setup mocks
-	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
-	
-	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
-	
-	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
-	
-	// Set valid origin header
-	headers := http.Header{
-		"Origin": []string{"http://localhost:3000"},
+// WithValidJWT configures JWT service for successful authentication
+func (m *MockSetup) WithValidJWT() *MockSetup {
+	m.jwt.On("ValidateToken", m.token).Return(m.userClaims, nil)
+	return m
+}
+
+// WithInvalidJWT configures JWT service for failed authentication
+func (m *MockSetup) WithInvalidJWT(token string, err error) *MockSetup {
+	m.jwt.On("ValidateToken", token).Return(nil, err)
+	return m
+}
+
+// WithRedisConnectionLimit configures Redis for connection limit checking
+func (m *MockSetup) WithRedisConnectionLimit(currentCount int) *MockSetup {
+	m.redis.On("GetConnectionCount", m.userClaims.UserID).Return(currentCount, nil)
+	return m
+}
+
+// WithRedisConnectionOps configures Redis for full connection lifecycle
+func (m *MockSetup) WithRedisConnectionOps() *MockSetup {
+	m.redis.On("IncrementConnectionCount", m.userClaims.UserID).Return(1, nil)
+	m.redis.On("DecrementConnectionCount", m.userClaims.UserID).Return(0, nil)
+	return m
+}
+
+// WithRedisError configures Redis to return errors
+func (m *MockSetup) WithRedisError(operation string, err error) *MockSetup {
+	switch operation {
+	case "GetConnectionCount":
+		m.redis.On("GetConnectionCount", m.userClaims.UserID).Return(0, err)
+	case "IncrementConnectionCount":
+		m.redis.On("IncrementConnectionCount", m.userClaims.UserID).Return(0, err)
+	}
+	return m
+}
+
+// WithFileUpload configures file manager for successful upload
+func (m *MockSetup) WithFileUpload(workspace, filename, content, encoding string, result *files.UploadResult) *MockSetup {
+	m.fileManager.On("UploadFile", context.Background(), workspace, filename, content, encoding).Return(result, nil)
+	return m
+}
+
+// WithFileList configures file manager for file listing
+func (m *MockSetup) WithFileList(workspace string, fileList []files.FileInfo) *MockSetup {
+	m.fileManager.On("ListFiles", context.Background(), workspace).Return(fileList, nil)
+	return m
+}
+
+// WithSession configures session manager
+func (m *MockSetup) WithSession(sessionID string, session *session.ClaudeSession) *MockSetup {
+	m.sessionManager.On("GetUserSessions", m.userClaims.UserID).Return([]string{sessionID})
+	m.sessionManager.On("GetSession", sessionID).Return(session)
+	return m
+}
+
+// WithNoSession configures session manager for no active sessions
+func (m *MockSetup) WithNoSession() *MockSetup {
+	m.sessionManager.On("GetUserSessions", m.userClaims.UserID).Return([]string{})
+	return m
+}
+
+// Build returns the configured mocks and handler
+func (m *MockSetup) Build() (*Handler, *MockJWTService, *MockRedisService, *MockFileManager, *MockSessionManager) {
+	handler := createTestHandler(m.jwt, m.redis, m.fileManager, m.sessionManager)
+	return handler, m.jwt, m.redis, m.fileManager, m.sessionManager
+}
+
+// TestDataFactory provides factory methods for common test objects
+type TestDataFactory struct{}
+
+// NewTestDataFactory creates a new test data factory
+func NewTestDataFactory() *TestDataFactory {
+	return &TestDataFactory{}
+}
+
+// CreateUser creates test user claims with optional overrides
+func (f *TestDataFactory) CreateUser(overrides ...func(*auth.UserClaims)) *auth.UserClaims {
+	user := &auth.UserClaims{
+		UserID:   testUserID,
+		GitHubID: testGitHubID,
+		Username: testUsername,
+		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	
-	// Attempt connection with authentication
-	conn, server := createTestClient(t, handler, headers, validToken)
+	for _, override := range overrides {
+		override(user)
+	}
+	
+	return user
+}
+
+// CreateExpiredUser creates user claims that are expired
+func (f *TestDataFactory) CreateExpiredUser() *auth.UserClaims {
+	return f.CreateUser(func(user *auth.UserClaims) {
+		user.ExpiresAt = time.Now().Add(-time.Hour)
+	})
+}
+
+// CreateAdminUser creates user claims for an admin user
+func (f *TestDataFactory) CreateAdminUser() *auth.UserClaims {
+	return f.CreateUser(func(user *auth.UserClaims) {
+		user.UserID = "admin123"
+		user.Username = "admin"
+	})
+}
+
+// CreateMessage creates a test WebSocket message
+func (f *TestDataFactory) CreateMessage(msgType, content string, data map[string]any) Message {
+	if data == nil {
+		data = make(map[string]any)
+	}
+	
+	return Message{
+		Type:      msgType,
+		Content:   content,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Data:      data,
+	}
+}
+
+// CreateChatMessage creates a chat message for testing
+func (f *TestDataFactory) CreateChatMessage(content string) Message {
+	return f.CreateMessage("chat_message", content, map[string]any{
+		"session_id": "test-session",
+	})
+}
+
+// CreateFileUploadMessage creates a file upload message for testing
+func (f *TestDataFactory) CreateFileUploadMessage(filename, content, encoding string) Message {
+	return f.CreateMessage("file_upload", "uploading file", map[string]any{
+		"filename": filename,
+		"content":  content,
+		"encoding": encoding,
+	})
+}
+
+// CreateFileListMessage creates a file list request message
+func (f *TestDataFactory) CreateFileListMessage() Message {
+	return f.CreateMessage("file_list", "get file list", nil)
+}
+
+// CreateSession creates a test Claude session
+func (f *TestDataFactory) CreateSession(userID, workspacePath string) *session.ClaudeSession {
+	return &session.ClaudeSession{
+		ID:            primitive.NewObjectID(),
+		UserID:        userID,
+		Status:        session.SessionStatusActive,
+		WorkspacePath: workspacePath,
+	}
+}
+
+// CreateFileUploadResult creates a mock file upload result
+func (f *TestDataFactory) CreateFileUploadResult(filename string, size int64, path string) *files.UploadResult {
+	return &files.UploadResult{
+		Filename: filename,
+		Size:     size,
+		Path:     path,
+	}
+}
+
+// CreateFileList creates a mock file list for testing
+func (f *TestDataFactory) CreateFileList() []files.FileInfo {
+	return []files.FileInfo{
+		{Name: "app.py", Size: 1024, Path: "/test/workspace/user123/app.py", IsDirectory: false},
+		{Name: "config.json", Size: 512, Path: "/test/workspace/user123/config.json", IsDirectory: false},
+	}
+}
+
+// CreateHeaders creates test headers with default origin
+func (f *TestDataFactory) CreateHeaders(origin ...string) http.Header {
+	originValue := testOrigin
+	if len(origin) > 0 {
+		originValue = origin[0]
+	}
+	
+	return http.Header{
+		"Origin": []string{originValue},
+	}
+}
+
+
+// TestWebSocketConnectionEstablishment tests successful WebSocket connection upgrade with authentication
+func TestWebSocketConnectionEstablishment(t *testing.T) {
+	// Setup using new builder pattern
+	handler, _, _, _, _ := NewMockSetup().
+		WithValidJWT().
+		WithRedisConnectionLimit(1).
+		WithRedisConnectionOps().
+		Build()
+	
+	// Create connection using new options pattern
+	conn, server, err := CreateTestClient(t, handler, WithToken(validJWTToken))
 	defer server.Close()
 	defer conn.Close()
 	
-	// Assertions - connection should be successfully established
-	assert.NotNil(t, conn, "Connection should not be nil")
+	// Assertions
+	require.NoError(t, err)
+	assert.NotNil(t, conn, "Connection should be established successfully")
 }
 
 // TestWebSocketJWTAuthentication tests successful JWT authentication during connection
@@ -222,7 +525,7 @@ func TestWebSocketJWTAuthentication(t *testing.T) {
 	
 	// Setup mocks
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := validJWTToken
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
 	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
@@ -245,17 +548,11 @@ func TestWebSocketJWTAuthentication(t *testing.T) {
 
 // TestWebSocketConnectionWithoutJWT tests rejection of unauthenticated connections
 func TestWebSocketConnectionWithoutJWT(t *testing.T) {
-	mockJWT := &MockJWTService{}
-	mockRedis := &MockRedisService{}
+	// Setup handler with no authentication expectations
+	handler, _, _, _, _ := NewMockSetup().Build()
 	
-	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
-	
-	headers := http.Header{
-		"Origin": []string{"http://localhost:3000"},
-	}
-	
-	// Attempt connection without authentication - should fail
-	conn, server, err := createTestClientNoAuth(t, handler, headers)
+	// Attempt connection without token - should fail
+	conn, server, err := CreateTestClient(t, handler, WithExpectFailure())
 	defer server.Close()
 	if conn != nil {
 		defer conn.Close()
@@ -272,7 +569,7 @@ func TestWebSocketConnectionWithExpiredJWT(t *testing.T) {
 	mockRedis := &MockRedisService{}
 	
 	// Setup mocks - expired token should return error
-	expiredToken := "expired-jwt-token"
+	expiredToken := expiredJWTToken
 	mockJWT.On("ValidateToken", expiredToken).Return(nil, fmt.Errorf("token expired"))
 	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
@@ -315,7 +612,7 @@ func TestWebSocketMessageBeforeAuthentication(t *testing.T) {
 	}
 	
 	// Attempt connection without authentication - should fail during handshake
-	conn, server, err := createTestClientNoAuth(t, handler, headers)
+	conn, server, err := createTestClientNoAuth(handler, headers)
 	defer server.Close()
 	if conn != nil {
 		defer conn.Close()
@@ -332,7 +629,7 @@ func TestWebSocketConnectionDropDuringAuthentication(t *testing.T) {
 	mockRedis := &MockRedisService{}
 	
 	// Setup mocks - invalid token should return error during handshake
-	invalidToken := "invalid-token"
+	invalidToken := invalidJWTToken
 	mockJWT.On("ValidateToken", invalidToken).Return(nil, fmt.Errorf("invalid token"))
 	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
@@ -366,31 +663,21 @@ func TestWebSocketConnectionDropDuringAuthentication(t *testing.T) {
 
 // TestWebSocketMalformedMessageHandling tests handling of invalid JSON/message format with authenticated connection
 func TestWebSocketMalformedMessageHandling(t *testing.T) {
-	mockJWT := &MockJWTService{}
-	mockRedis := &MockRedisService{}
-	
-	// Setup mocks for authentication
-	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
-	
-	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
-	
-	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
-	
-	headers := http.Header{
-		"Origin": []string{"http://localhost:3000"},
-	}
+	// Setup authenticated connection using builder pattern
+	handler, _, _, _, _ := NewMockSetup().
+		WithValidJWT().
+		WithRedisConnectionLimit(1).
+		WithRedisConnectionOps().
+		Build()
 	
 	// Create authenticated connection
-	conn, server := createTestClient(t, handler, headers, validToken)
+	conn, server, err := CreateTestClient(t, handler, WithToken(validJWTToken))
 	defer server.Close()
 	defer conn.Close()
+	require.NoError(t, err)
 	
 	// Send malformed JSON
-	err := conn.WriteMessage(websocket.TextMessage, []byte(`{invalid json`))
+	err = conn.WriteMessage(websocket.TextMessage, []byte(`{invalid json`))
 	require.NoError(t, err)
 	
 	// Read error response
@@ -410,7 +697,7 @@ func TestWebSocketMaxConnectionsPerUser(t *testing.T) {
 	
 	// Setup mocks
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := validJWTToken
 	
 	// Mock successful validation for both attempts
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
@@ -463,7 +750,7 @@ func TestWebSocketRedisUnavailableDuringConnection(t *testing.T) {
 	
 	// Setup mocks
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := validJWTToken
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
 	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(0, fmt.Errorf("redis connection failed"))
@@ -507,7 +794,7 @@ func TestWebSocketConcurrentConnectionsFromSameUser(t *testing.T) {
 	
 	// Setup mocks
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := validJWTToken
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
 	// First connection - should succeed
@@ -625,7 +912,7 @@ func TestWebSocketConnectionCleanupOnProcessExit(t *testing.T) {
 	
 	// Setup mocks
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := validJWTToken
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
 	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)

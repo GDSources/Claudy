@@ -15,6 +15,17 @@ import (
 	"claudy/internal/session"
 )
 
+// File integration test constants
+const (
+	fileTestOrigin      = "http://localhost:3000"
+	fileValidJWTToken   = "valid-jwt-token"
+	fileTestUserID      = "user123"
+	fileTestWorkspace   = "/test/workspace/user123"
+	fileTestName        = "test.py"
+	fileTestContent     = "print('Hello World')"
+	fileTestEncoding    = "utf-8"
+)
+
 // TestWebSocketFileUploadIntegration tests the complete file upload flow through WebSocket
 func TestWebSocketFileUploadIntegration(t *testing.T) {
 	mockJWT := &MockJWTService{}
@@ -24,38 +35,38 @@ func TestWebSocketFileUploadIntegration(t *testing.T) {
 
 	// Setup user and session
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := fileValidJWTToken
 	sessionID := primitive.NewObjectID().Hex()
-	workspacePath := "/test/workspace/user123"
+	workspacePath := fileTestWorkspace
 
 	// Setup JWT and Redis mocks
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
+	mockRedis.On("GetConnectionCount", fileTestUserID).Return(1, nil)
+	mockRedis.On("IncrementConnectionCount", fileTestUserID).Return(1, nil)
+	mockRedis.On("DecrementConnectionCount", fileTestUserID).Return(0, nil)
 
 	// Setup session mock
 	testSession := &session.ClaudeSession{
 		ID:            primitive.ObjectID{},
-		UserID:        validClaims.UserID,
+		UserID:        fileTestUserID,
 		Status:        session.SessionStatusActive,
 		WorkspacePath: workspacePath,
 	}
-	mockSessionManager.On("GetUserSessions", validClaims.UserID).Return([]string{sessionID})
+	mockSessionManager.On("GetUserSessions", fileTestUserID).Return([]string{sessionID})
 	mockSessionManager.On("GetSession", sessionID).Return(testSession)
 
 	// Setup file manager mock
 	expectedResult := &files.UploadResult{
-		Filename: "test.py",
+		Filename: fileTestName,
 		Size:     19,
 		Path:     "/test/workspace/user123/test.py",
 	}
 	mockFileManager.On("UploadFile", 
 		context.Background(), 
 		workspacePath, 
-		"test.py", 
-		"print('Hello World')", 
-		"utf-8",
+		fileTestName, 
+		fileTestContent, 
+		fileTestEncoding,
 	).Return(expectedResult, nil)
 
 	handler := createTestHandler(mockJWT, mockRedis, mockFileManager, mockSessionManager)
@@ -75,7 +86,7 @@ func TestWebSocketFileUploadIntegration(t *testing.T) {
 		Type:      "file_upload",
 		Content:   "uploading file",
 		Timestamp: time.Now().Format(time.RFC3339),
-		Data: map[string]interface{}{
+		Data: map[string]any{
 			"filename": "test.py",
 			"content":  "print('Hello World')",
 			"encoding": "utf-8",
@@ -119,24 +130,24 @@ func TestWebSocketFileListIntegration(t *testing.T) {
 
 	// Setup user and session
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := fileValidJWTToken
 	sessionID := primitive.NewObjectID().Hex()
-	workspacePath := "/test/workspace/user123"
+	workspacePath := fileTestWorkspace
 
 	// Setup JWT and Redis mocks
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
+	mockRedis.On("GetConnectionCount", fileTestUserID).Return(1, nil)
+	mockRedis.On("IncrementConnectionCount", fileTestUserID).Return(1, nil)
+	mockRedis.On("DecrementConnectionCount", fileTestUserID).Return(0, nil)
 
 	// Setup session mock
 	testSession := &session.ClaudeSession{
 		ID:            primitive.ObjectID{},
-		UserID:        validClaims.UserID,
+		UserID:        fileTestUserID,
 		Status:        session.SessionStatusActive,
 		WorkspacePath: workspacePath,
 	}
-	mockSessionManager.On("GetUserSessions", validClaims.UserID).Return([]string{sessionID})
+	mockSessionManager.On("GetUserSessions", fileTestUserID).Return([]string{sessionID})
 	mockSessionManager.On("GetSession", sessionID).Return(testSession)
 
 	// Setup file manager mock
@@ -163,7 +174,7 @@ func TestWebSocketFileListIntegration(t *testing.T) {
 		Type:      "file_list",
 		Content:   "get file list",
 		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      map[string]interface{}{},
+		Data:      map[string]any{},
 	}
 	err := conn.WriteJSON(fileListMsg)
 	require.NoError(t, err)
@@ -179,7 +190,7 @@ func TestWebSocketFileListIntegration(t *testing.T) {
 	assert.Equal(t, workspacePath, listResponse.Data["workspace_path"])
 
 	// Verify files array
-	filesData, ok := listResponse.Data["files"].([]interface{})
+	filesData, ok := listResponse.Data["files"].([]any)
 	require.True(t, ok, "files should be an array")
 	assert.Len(t, filesData, 2)
 
@@ -215,16 +226,16 @@ func TestWebSocketFileUploadNoSession(t *testing.T) {
 
 	// Setup user without active session
 	validClaims := createValidUserClaims()
-	validToken := "valid-jwt-token"
+	validToken := fileValidJWTToken
 
 	// Setup JWT and Redis mocks
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
+	mockRedis.On("GetConnectionCount", fileTestUserID).Return(1, nil)
+	mockRedis.On("IncrementConnectionCount", fileTestUserID).Return(1, nil)
+	mockRedis.On("DecrementConnectionCount", fileTestUserID).Return(0, nil)
 
 	// Setup session mock - no active sessions
-	mockSessionManager.On("GetUserSessions", validClaims.UserID).Return([]string{})
+	mockSessionManager.On("GetUserSessions", fileTestUserID).Return([]string{})
 
 	handler := createTestHandler(mockJWT, mockRedis, mockFileManager, mockSessionManager)
 
@@ -243,7 +254,7 @@ func TestWebSocketFileUploadNoSession(t *testing.T) {
 		Type:      "file_upload",
 		Content:   "uploading file",
 		Timestamp: time.Now().Format(time.RFC3339),
-		Data: map[string]interface{}{
+		Data: map[string]any{
 			"filename": "test.py",
 			"content":  "print('Hello World')",
 			"encoding": "utf-8",

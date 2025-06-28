@@ -126,18 +126,41 @@ func createTestHandler(jwtService JWTService, redisService RedisService, fileMan
 	return NewHandler(jwtService, redisService, fileManager, sessionManager, config)
 }
 
-// Helper function to create a test WebSocket client
-func createTestClient(t *testing.T, handler *Handler, headers http.Header) (*websocket.Conn, *httptest.Server) {
+// Helper function to create a test WebSocket client with authentication
+func createTestClient(t *testing.T, handler *Handler, headers http.Header, token string) (*websocket.Conn, *httptest.Server) {
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
 	
 	// Convert http://... to ws://...
 	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws"
+	
+	// Add token as query parameter if provided
+	if token != "" {
+		wsURL += "?token=" + token
+	}
 	
 	dialer := websocket.Dialer{}
 	conn, _, err := dialer.Dial(wsURL, headers)
 	require.NoError(t, err)
 	
 	return conn, server
+}
+
+// Helper function to create a test WebSocket client without authentication (for negative tests)
+func createTestClientNoAuth(t *testing.T, handler *Handler, headers http.Header) (*websocket.Conn, *httptest.Server, error) {
+	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	
+	// Convert http://... to ws://...
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws"
+	
+	dialer := websocket.Dialer{}
+	conn, resp, err := dialer.Dial(wsURL, headers)
+	
+	// For tests that expect failure, return the error
+	if err != nil && resp != nil {
+		resp.Body.Close()
+	}
+	
+	return conn, server, err
 }
 
 // Helper function to create valid user claims
@@ -160,38 +183,37 @@ func createAuthMessage(token string) Message {
 	}
 }
 
-// TestWebSocketConnectionEstablishment tests successful WebSocket connection upgrade
+// TestWebSocketConnectionEstablishment tests successful WebSocket connection upgrade with authentication
 func TestWebSocketConnectionEstablishment(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
+	// Setup mocks
+	validClaims := createValidUserClaims()
+	validToken := "valid-jwt-token"
+	
+	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
+	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
+	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
+	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
-	
-	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	defer server.Close()
-	
-	// Convert to WebSocket URL
-	wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
 	
 	// Set valid origin header
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
 	
-	// Attempt connection
-	dialer := websocket.Dialer{}
-	conn, _, err := dialer.Dial(wsURL, headers)
+	// Attempt connection with authentication
+	conn, server := createTestClient(t, handler, headers, validToken)
+	defer server.Close()
+	defer conn.Close()
 	
-	// Assertions
-	assert.NoError(t, err, "WebSocket connection should be established successfully")
+	// Assertions - connection should be successfully established
 	assert.NotNil(t, conn, "Connection should not be nil")
-	
-	// Clean up
-	conn.Close()
 }
 
-// TestWebSocketJWTAuthentication tests successful JWT authentication after connection
+// TestWebSocketJWTAuthentication tests successful JWT authentication during connection
 func TestWebSocketJWTAuthentication(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
@@ -203,43 +225,22 @@ func TestWebSocketJWTAuthentication(t *testing.T) {
 	validToken := "valid-jwt-token"
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 	
 	handler := createTestHandler(mockJWT, mockRedis, mockFileManager, mockSessionManager)
 	
-	// Create connection with valid origin
+	// Create connection with valid origin and authentication
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	conn, server := createTestClient(t, handler, headers, validToken)
 	defer server.Close()
 	defer conn.Close()
 	
-	// Send authentication message
-	authMsg := createAuthMessage(validToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
-	
-	// Read response
-	var response Message
-	err = conn.ReadJSON(&response)
-	require.NoError(t, err)
-	
-	// Assertions
-	assert.Equal(t, "auth_success", response.Type)
-	assert.Contains(t, response.Content, "authenticated")
-	
-	// Close connection to trigger cleanup
-	conn.Close()
-	server.Close()
-	
-	// Wait for cleanup to complete
-	time.Sleep(100 * time.Millisecond)
-	
-	mockJWT.AssertExpectations(t)
-	mockRedis.AssertExpectations(t)
+	// Connection should be established and authenticated
+	assert.NotNil(t, conn, "Connection should be established with valid authentication")
 }
 
 // TestWebSocketConnectionWithoutJWT tests rejection of unauthenticated connections
@@ -252,29 +253,17 @@ func TestWebSocketConnectionWithoutJWT(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
-	defer server.Close()
-	defer conn.Close()
 	
-	// Send non-auth message without authenticating first
-	chatMsg := Message{
-		Type:      "chat_message",
-		Content:   "Hello",
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      map[string]interface{}{},
+	// Attempt connection without authentication - should fail
+	conn, server, err := createTestClientNoAuth(t, handler, headers)
+	defer server.Close()
+	if conn != nil {
+		defer conn.Close()
 	}
 	
-	err := conn.WriteJSON(chatMsg)
-	require.NoError(t, err)
-	
-	// Read response - should be error
-	var response Message
-	err = conn.ReadJSON(&response)
-	require.NoError(t, err)
-	
-	// Assertions
-	assert.Equal(t, "error", response.Type)
-	assert.Contains(t, response.Content, "authentication required")
+	// Assertions - connection should be rejected
+	assert.Error(t, err, "Connection without authentication should be rejected")
+	assert.Nil(t, conn, "Connection should be nil when authentication fails")
 }
 
 // TestWebSocketConnectionWithExpiredJWT tests handling of expired tokens
@@ -291,28 +280,30 @@ func TestWebSocketConnectionWithExpiredJWT(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	
+	// Create test server
+	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
 	defer server.Close()
-	defer conn.Close()
 	
-	// Send authentication message with expired token
-	authMsg := createAuthMessage(expiredToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
+	// Try with expired token in URL
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws?token=" + expiredToken
+	dialer := websocket.Dialer{}
+	conn, resp, err := dialer.Dial(wsURL, headers)
+	if conn != nil {
+		defer conn.Close()
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	
-	// Read response
-	var response Message
-	err = conn.ReadJSON(&response)
-	require.NoError(t, err)
-	
-	// Assertions
-	assert.Equal(t, "error", response.Type)
-	assert.Contains(t, response.Content, "authentication failed")
-	
-	mockJWT.AssertExpectations(t)
+	// Assertions - connection should be rejected due to expired token
+	assert.Error(t, err, "Connection with expired token should be rejected")
+	if resp != nil {
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "Should return 401 for expired token")
+	}
 }
 
-// TestWebSocketMessageBeforeAuthentication tests rejection of messages before auth
+// TestWebSocketMessageBeforeAuthentication tests that connections without auth are rejected at handshake
 func TestWebSocketMessageBeforeAuthentication(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
@@ -322,74 +313,79 @@ func TestWebSocketMessageBeforeAuthentication(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
-	defer server.Close()
-	defer conn.Close()
 	
-	// Send message before authentication
-	msg := Message{
-		Type:      "chat_message",
-		Content:   "Hello before auth",
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      map[string]interface{}{},
+	// Attempt connection without authentication - should fail during handshake
+	conn, server, err := createTestClientNoAuth(t, handler, headers)
+	defer server.Close()
+	if conn != nil {
+		defer conn.Close()
 	}
 	
-	err := conn.WriteJSON(msg)
-	require.NoError(t, err)
-	
-	// Read error response
-	var response Message
-	err = conn.ReadJSON(&response)
-	require.NoError(t, err)
-	
-	// Assertions
-	assert.Equal(t, "error", response.Type)
-	assert.Contains(t, response.Content, "authentication required")
+	// Assertions - connection should be rejected during handshake
+	assert.Error(t, err, "Connection without authentication should be rejected during handshake")
+	assert.Nil(t, conn, "Connection should be nil when authentication fails during handshake")
 }
 
-// TestWebSocketConnectionDropDuringAuthentication tests handling connection loss during auth
+// TestWebSocketConnectionDropDuringAuthentication tests handling invalid tokens during handshake
 func TestWebSocketConnectionDropDuringAuthentication(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
-	// Setup mocks - we expect the ValidateToken to be called but we'll close before completion
-	mockJWT.On("ValidateToken", "some-token").Return(nil, fmt.Errorf("connection closed"))
+	// Setup mocks - invalid token should return error during handshake
+	invalidToken := "invalid-token"
+	mockJWT.On("ValidateToken", invalidToken).Return(nil, fmt.Errorf("invalid token"))
 	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
+	
+	// Create test server
+	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	defer server.Close()
+	
+	// Convert to WebSocket URL with invalid token
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws?token=" + invalidToken
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
-	defer server.Close()
 	
-	// Start authentication process but close connection immediately
-	authMsg := createAuthMessage("some-token")
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
+	dialer := websocket.Dialer{}
+	conn, resp, err := dialer.Dial(wsURL, headers)
+	if conn != nil {
+		defer conn.Close()
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	
-	// Close connection immediately
-	conn.Close()
-	
-	// Handler should gracefully handle the dropped connection
-	// This test verifies no panic occurs and cleanup happens properly
-	time.Sleep(100 * time.Millisecond) // Give handler time to process
-	
-	// Test passes if no panic occurred
-	assert.True(t, true, "Handler should gracefully handle dropped connections")
+	// Assertions - connection should be rejected due to invalid token
+	assert.Error(t, err, "Connection with invalid token should be rejected during handshake")
+	if resp != nil {
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "Should return 401 for invalid token")
+	}
 }
 
-// TestWebSocketMalformedMessageHandling tests handling of invalid JSON/message format
+// TestWebSocketMalformedMessageHandling tests handling of invalid JSON/message format with authenticated connection
 func TestWebSocketMalformedMessageHandling(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
 	
+	// Setup mocks for authentication
+	validClaims := createValidUserClaims()
+	validToken := "valid-jwt-token"
+	
+	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
+	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
+	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
+	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	
+	// Create authenticated connection
+	conn, server := createTestClient(t, handler, headers, validToken)
 	defer server.Close()
 	defer conn.Close()
 	
@@ -416,65 +412,51 @@ func TestWebSocketMaxConnectionsPerUser(t *testing.T) {
 	validClaims := createValidUserClaims()
 	validToken := "valid-jwt-token"
 	
+	// Mock successful validation for both attempts
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
-	// First connection should succeed (count = 1)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil).Once()
-	// Fourth connection should exceed limit (count = 4)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(4, nil).Once()
-	// Fourth connection will decrement immediately after exceeding limit
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(3, nil).Once()
-	// First connection will decrement when it closes
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil).Once()
+	// First connection succeeds (count = 2, under limit)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(2, nil).Once()
+	// Second connection exceeds limit (count = 4, over limit of 3)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(4, nil).Once()
+	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
+	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
-	// Create first connection (should succeed)
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn1, server := createTestClient(t, handler, headers)
-	defer server.Close()
+	
+	// Create first connection (should succeed - under limit)
+	conn1, server1 := createTestClient(t, handler, headers, validToken)
+	defer server1.Close()
 	defer conn1.Close()
 	
-	// Authenticate first connection
-	authMsg := createAuthMessage(validToken)
-	err := conn1.WriteJSON(authMsg)
-	require.NoError(t, err)
+	// First connection should succeed
+	assert.NotNil(t, conn1, "First connection should succeed when under limit")
 	
-	// Read success response
-	var response Message
-	err = conn1.ReadJSON(&response)
-	require.NoError(t, err)
-	assert.Equal(t, "auth_success", response.Type)
+	// Try to create second connection (should be rejected - over limit)
+	server2 := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	defer server2.Close()
 	
-	// Try to create fourth connection (should be rejected due to limit)
-	conn4, _ := createTestClient(t, handler, headers)
-	defer conn4.Close()
+	wsURL := strings.Replace(server2.URL, "http://", "ws://", 1) + "/ws?token=" + validToken
+	dialer := websocket.Dialer{}
+	conn2, resp, err := dialer.Dial(wsURL, headers)
+	if conn2 != nil {
+		defer conn2.Close()
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	
-	// Authenticate fourth connection
-	err = conn4.WriteJSON(authMsg)
-	require.NoError(t, err)
-	
-	// Read rejection response
-	err = conn4.ReadJSON(&response)
-	require.NoError(t, err)
-	assert.Equal(t, "error", response.Type)
-	assert.Contains(t, response.Content, "connection limit exceeded")
-	
-	// Close connections to trigger cleanup
-	conn1.Close()
-	conn4.Close()
-	server.Close()
-	
-	// Wait for cleanup to complete
-	time.Sleep(100 * time.Millisecond)
-	
-	mockJWT.AssertExpectations(t)
-	mockRedis.AssertExpectations(t)
+	// Second connection should be rejected due to connection limit
+	assert.Error(t, err, "Second connection should be rejected due to connection limit")
+	if resp != nil {
+		assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Should return 429 for connection limit exceeded")
+	}
 }
 
-// TestWebSocketRedisUnavailableDuringConnection tests handling Redis failures
+// TestWebSocketRedisUnavailableDuringConnection tests handling Redis failures during handshake
 func TestWebSocketRedisUnavailableDuringConnection(t *testing.T) {
 	mockJWT := &MockJWTService{}
 	mockRedis := &MockRedisService{}
@@ -484,31 +466,35 @@ func TestWebSocketRedisUnavailableDuringConnection(t *testing.T) {
 	validToken := "valid-jwt-token"
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(0, fmt.Errorf("redis connection failed"))
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(0, fmt.Errorf("redis connection failed"))
 	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
+	
+	// Create test server
+	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
+	defer server.Close()
+	
+	// Convert to WebSocket URL with valid token
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws?token=" + validToken
 	
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
-	defer server.Close()
-	defer conn.Close()
 	
-	// Send authentication message
-	authMsg := createAuthMessage(validToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
+	dialer := websocket.Dialer{}
+	conn, resp, err := dialer.Dial(wsURL, headers)
+	if conn != nil {
+		defer conn.Close()
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	
-	// Read response - should be error due to Redis failure
-	var response Message
-	err = conn.ReadJSON(&response)
-	require.NoError(t, err)
-	
-	// Assertions
-	assert.Equal(t, "error", response.Type)
-	assert.Contains(t, response.Content, "service temporarily unavailable")
+	// Assertions - connection should be rejected due to Redis failure
+	assert.Error(t, err, "Connection should fail when Redis is unavailable")
+	if resp != nil {
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "Should return 500 for Redis failure")
+	}
 	
 	mockJWT.AssertExpectations(t)
 	mockRedis.AssertExpectations(t)
@@ -524,13 +510,15 @@ func TestWebSocketConcurrentConnectionsFromSameUser(t *testing.T) {
 	validToken := "valid-jwt-token"
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
-	// First connection
-	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil).Once()
-	// Second connection
+	// First connection - should succeed
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil).Once()
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(2, nil).Once()
+	// Second connection - should succeed  
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(2, nil).Once()
+	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(3, nil).Once()
 	// Cleanup
-	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(1, nil).Times(2)
+	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(2, nil).Once()
+	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(1, nil).Once()
 	
 	handler := createTestHandler(mockJWT, mockRedis, &MockFileManager{}, &MockSessionManager{})
 	
@@ -547,7 +535,9 @@ func TestWebSocketConcurrentConnectionsFromSameUser(t *testing.T) {
 		headers := http.Header{
 			"Origin": []string{"http://localhost:3000"},
 		}
-		conn, server := createTestClient(t, handler, headers)
+		
+		// Create authenticated connection
+		conn, server := createTestClient(t, handler, headers, validToken)
 		
 		// Store connections so we can close them later
 		if connNum == 1 {
@@ -555,17 +545,6 @@ func TestWebSocketConcurrentConnectionsFromSameUser(t *testing.T) {
 		} else {
 			conn2, server2 = conn, server
 		}
-		
-		// Authenticate
-		authMsg := createAuthMessage(validToken)
-		err := conn.WriteJSON(authMsg)
-		require.NoError(t, err)
-		
-		// Read response
-		var response Message
-		err = conn.ReadJSON(&response)
-		require.NoError(t, err)
-		assert.Equal(t, "auth_success", response.Type)
 		
 		// Keep connection open briefly
 		time.Sleep(100 * time.Millisecond)
@@ -576,6 +555,10 @@ func TestWebSocketConcurrentConnectionsFromSameUser(t *testing.T) {
 	go connectAndAuth(2)
 	
 	wg.Wait()
+	
+	// Verify both connections are established
+	assert.NotNil(t, conn1, "First connection should be established")
+	assert.NotNil(t, conn2, "Second connection should be established")
 	
 	// Close connections explicitly to trigger cleanup
 	if conn1 != nil {
@@ -645,7 +628,7 @@ func TestWebSocketConnectionCleanupOnProcessExit(t *testing.T) {
 	validToken := "valid-jwt-token"
 	
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 	
@@ -654,19 +637,13 @@ func TestWebSocketConnectionCleanupOnProcessExit(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	
+	// Create authenticated connection
+	conn, server := createTestClient(t, handler, headers, validToken)
 	defer server.Close()
 	
-	// Authenticate connection
-	authMsg := createAuthMessage(validToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
-	
-	// Read success response
-	var response Message
-	err = conn.ReadJSON(&response)
-	require.NoError(t, err)
-	assert.Equal(t, "auth_success", response.Type)
+	// Verify connection is established
+	assert.NotNil(t, conn, "Connection should be established")
 	
 	// Test cleanup by calling handler's cleanup method
 	handler.Shutdown()

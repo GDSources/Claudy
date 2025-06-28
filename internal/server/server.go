@@ -34,25 +34,40 @@ type Server struct {
 // NewServer creates a new server instance with all dependencies configured
 func NewServer() *Server {
 	// Load configuration
-	cfg := &config.Config{
-		Database: config.DatabaseConfig{
-			URI:            getEnvOrDefault("MONGO_URI", "mongodb://localhost:27017"),
-			Database:       getEnvOrDefault("MONGO_DB", "claudy"),
-			ConnectTimeout: 30 * time.Second,
-			QueryTimeout:   10 * time.Second,
-			MaxPoolSize:    100,
-			MinPoolSize:    10,
-		},
-		Redis: config.RedisConfig{
-			Addr:         getEnvOrDefault("REDIS_ADDR", "localhost:6379"),
-			Password:     getEnvOrDefault("REDIS_PASSWORD", ""),
-			DB:           0,
-			DialTimeout:  5 * time.Second,
-			ReadTimeout:  3 * time.Second,
-			WriteTimeout: 3 * time.Second,
-			PoolSize:     10,
-			MinIdleConns: 5,
-		},
+	cfg, err := config.Load()
+	if err != nil {
+		// Log error and use fallback configuration
+		log.Printf("Warning: failed to load config, using defaults: %v", err)
+		cfg = &config.Config{
+			Database: config.DatabaseConfig{
+				URI:            getEnvOrDefault("MONGO_URI", "mongodb://localhost:27017"),
+				Database:       getEnvOrDefault("MONGO_DB", "claudy"),
+				ConnectTimeout: 30 * time.Second,
+				QueryTimeout:   10 * time.Second,
+				MaxPoolSize:    100,
+				MinPoolSize:    10,
+			},
+			Redis: config.RedisConfig{
+				Addr:         getEnvOrDefault("REDIS_ADDR", "localhost:6379"),
+				Password:     getEnvOrDefault("REDIS_PASSWORD", ""),
+				DB:           0,
+				DialTimeout:  5 * time.Second,
+				ReadTimeout:  3 * time.Second,
+				WriteTimeout: 3 * time.Second,
+				PoolSize:     10,
+				MinIdleConns: 5,
+			},
+			WebSocket: config.WebSocketConfig{
+				Enabled:               true,
+				Path:                  "/ws",
+				MaxConnectionsPerUser: 3,
+				AllowedOrigins:        []string{"http://localhost:3000", "https://app.claudy.com"},
+				ReadTimeout:           60 * time.Second,
+				WriteTimeout:          10 * time.Second,
+				PingInterval:          30 * time.Second,
+				BufferSize:            1024,
+			},
+		}
 	}
 
 	// Create dependency injection container
@@ -87,7 +102,7 @@ func NewServer() *Server {
 		environment: env,
 	}
 
-	// Setup routes
+	// Setup routes (will be updated when container is initialized)
 	server.setupRoutes()
 
 	return server
@@ -113,6 +128,21 @@ func (s *Server) GetContainer() *container.Container {
 	return s.container
 }
 
+// Initialize initializes the container and updates routes
+func (s *Server) Initialize() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	ctx := context.Background()
+	if err := s.container.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize container: %w", err)
+	}
+	
+	// Setup WebSocket routes now that container is initialized
+	s.setupWebSocketRoutes()
+	return nil
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	s.mu.Lock()
@@ -122,10 +152,14 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server already started")
 	}
 
-	// Initialize container
-	ctx := context.Background()
-	if err := s.container.Initialize(ctx); err != nil {
-		return fmt.Errorf("failed to initialize container: %w", err)
+	// Initialize container if not already done
+	if !s.container.IsStarted() {
+		s.mu.Unlock() // Temporarily unlock to avoid deadlock
+		if err := s.Initialize(); err != nil {
+			s.mu.Lock() // Re-lock for proper cleanup
+			return fmt.Errorf("failed to initialize server: %w", err)
+		}
+		s.mu.Lock() // Re-lock for the rest of the function
 	}
 
 	// Create HTTP server
@@ -224,6 +258,9 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
+	// WebSocket endpoint (setup after container initialization)
+	s.setupWebSocketRoutes()
+
 	// API routes group
 	api := s.router.Group("/api/v1")
 	{
@@ -235,6 +272,19 @@ func (s *Server) setupRoutes() {
 				"port":        s.port,
 			})
 		})
+	}
+}
+
+// setupWebSocketRoutes sets up WebSocket routes if container is initialized
+func (s *Server) setupWebSocketRoutes() {
+	// Only setup WebSocket routes if container is initialized and WebSocket is enabled
+	if s.container.IsStarted() && s.config.WebSocket.Enabled {
+		wsHandler := s.container.GetWebSocketHandler()
+		if wsHandler != nil {
+			s.router.GET(s.config.WebSocket.Path, func(c *gin.Context) {
+				wsHandler.HandleWebSocket(c.Writer, c.Request)
+			})
+		}
 	}
 }
 

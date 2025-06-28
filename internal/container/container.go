@@ -3,11 +3,18 @@ package container
 import (
 	"context"
 	"fmt"
-	"strings"
+	"os"
 	"sync"
 	"time"
 
+	"claudy/internal/auth"
 	"claudy/internal/config"
+	"claudy/internal/files"
+	"claudy/internal/models"
+	"claudy/internal/redis"
+	"claudy/internal/repository"
+	"claudy/internal/session"
+	"claudy/internal/websocket"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -18,14 +25,14 @@ import (
 type Container struct {
 	config *config.Config
 	
-	// Core services - using interface{} for now, will be typed properly in future tests
+	// Core services
 	mongoClient    *mongo.Client
-	redisService   interface{}
-	userRepo       interface{}
-	jwtService     interface{}
-	fileManager    interface{}
-	sessionManager interface{}
-	wsHandler      interface{}
+	redisService   *redis.Service
+	userRepo       models.UserRepository
+	jwtService     *auth.JWTService
+	fileManager    *files.FileManager
+	sessionManager *session.ClaudeSessionManager
+	wsHandler      *websocket.Handler
 	
 	// Health and metrics
 	healthChecker *HealthChecker
@@ -93,8 +100,12 @@ func (c *Container) Initialize(ctx context.Context) error {
 		return fmt.Errorf("infrastructure initialization failed: %w", err)
 	}
 	
-	// Initialize application services (stubs for now - will be replaced with real services)
-	c.initializeApplicationServices()
+	// Initialize application services (depends on infrastructure)
+	if err := c.initializeApplicationServices(); err != nil {
+		c.trackError("initialization", err)
+		c.cleanupPartialInitialization(ctx)
+		return fmt.Errorf("application services initialization failed: %w", err)
+	}
 	
 	c.started = true
 	c.everStarted = true
@@ -103,46 +114,202 @@ func (c *Container) Initialize(ctx context.Context) error {
 
 // initializeInfrastructureServices initializes infrastructure-level services (databases, caches)
 func (c *Container) initializeInfrastructureServices(ctx context.Context) error {
-	// Initialize MongoDB first
+	// Initialize MongoDB - Redis will be initialized later in application services
 	if err := c.initializeMongoDB(ctx); err != nil {
 		return fmt.Errorf("MongoDB initialization failed: %w", err)
-	}
-	
-	// Initialize Redis second
-	if err := c.initializeRedis(ctx); err != nil {
-		return fmt.Errorf("Redis initialization failed: %w", err)
 	}
 	
 	return nil
 }
 
 // initializeApplicationServices initializes application-level services that depend on infrastructure
-func (c *Container) initializeApplicationServices() {
-	// Service stubs - clearly labeled for easy identification during development
-	// Note: Infrastructure services (MongoDB, Redis) are initialized separately
-	c.userRepo = &ServiceStub{Name: "user_repository", Initialized: true}
+func (c *Container) initializeApplicationServices() error {
+	// Initialize services in dependency order
+	
+	// 1. Initialize user repository (depends on MongoDB)
+	if err := c.initializeUserRepository(); err != nil {
+		return fmt.Errorf("user repository initialization failed: %w", err)
+	}
+	
+	// 2. Initialize JWT service (independent)
+	if err := c.initializeJWTService(); err != nil {
+		return fmt.Errorf("JWT service initialization failed: %w", err)
+	}
+	
+	// 3. Initialize Redis service
+	if err := c.initializeRedisService(); err != nil {
+		return fmt.Errorf("Redis service initialization failed: %w", err)
+	}
+	
+	// 4. Initialize file manager (independent)
+	if err := c.initializeFileManager(); err != nil {
+		return fmt.Errorf("file manager initialization failed: %w", err)
+	}
+	
+	// 5. Initialize session manager (depends on various services)
+	if err := c.initializeSessionManager(); err != nil {
+		return fmt.Errorf("session manager initialization failed: %w", err)
+	}
+	
+	// 6. Initialize WebSocket handler (depends on all other services)
+	if err := c.initializeWebSocketHandler(); err != nil {
+		return fmt.Errorf("WebSocket handler initialization failed: %w", err)
+	}
+	
+	return nil
+}
+
+// initializeUserRepository initializes the user repository
+func (c *Container) initializeUserRepository() error {
+	db := c.mongoClient.Database(c.config.Database.Database)
+	c.userRepo = repository.NewMongoUserRepository(db)
 	c.trackInitialization("user_repository")
+	return nil
+}
+
+// initializeJWTService initializes the JWT service
+func (c *Container) initializeJWTService() error {
+	// Read private key from file
+	privateKeyData, err := os.ReadFile(c.config.JWT.PrivateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to read private key file: %w", err)
+	}
 	
-	c.jwtService = &ServiceStub{Name: "jwt_service", Initialized: true}
+	// Read public key from file
+	publicKeyData, err := os.ReadFile(c.config.JWT.PublicKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to read public key file: %w", err)
+	}
+	
+	jwtService, err := auth.NewJWTService(string(privateKeyData), string(publicKeyData))
+	if err != nil {
+		return fmt.Errorf("failed to create JWT service: %w", err)
+	}
+	
+	c.jwtService = jwtService
 	c.trackInitialization("jwt_service")
+	return nil
+}
+
+// initializeRedisService initializes the Redis service
+func (c *Container) initializeRedisService() error {
+	redisService := redis.NewService(
+		c.config.Redis.Addr,
+		c.config.Redis.Password,
+		c.config.Redis.DB,
+	)
 	
-	c.fileManager = &ServiceStub{Name: "file_manager", Initialized: true}
+	c.redisService = redisService
+	c.trackInitialization("redis_service")
+	return nil
+}
+
+// initializeFileManager initializes the file manager
+func (c *Container) initializeFileManager() error {
+	fileManager := files.NewFileManager(
+		c.config.Claude.MaxFileSize,
+		c.config.Claude.MaxWorkspaceSize,
+	)
+	
+	c.fileManager = fileManager
 	c.trackInitialization("file_manager")
+	return nil
+}
+
+// initializeSessionManager initializes the Claude session manager
+func (c *Container) initializeSessionManager() error {
+	// Create Claude API client
+	apiClient := session.NewHTTPClaudeAPIClient(c.config.Claude.APIBaseURL)
 	
-	c.sessionManager = &ServiceStub{Name: "session_manager", Initialized: true}
+	// Create process manager
+	processManager := session.NewLocalProcessManager(c.config.Claude.CodePath)
+	
+	// Create workspace manager
+	workspaceManager := session.NewLocalWorkspaceManager(c.config.Claude.WorkspaceBasePath)
+	
+	// Create encryption service
+	// For now, use a default key - in production this should be from config
+	encryptionKey := []byte(c.config.Security.EncryptionKey)
+	if len(encryptionKey) != 32 {
+		// Generate a default key if not properly configured
+		encryptionKey = []byte("default-32-byte-key-for-testing!!")
+	}
+	
+	encryptionService, err := session.NewAESGCMEncryptionService(encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to create encryption service: %w", err)
+	}
+	
+	// Create session manager
+	sessionManager := session.NewClaudeSessionManager(
+		apiClient,
+		processManager,
+		workspaceManager,
+		encryptionService,
+	)
+	
+	c.sessionManager = sessionManager
 	c.trackInitialization("session_manager")
+	return nil
+}
+
+// initializeWebSocketHandler initializes the WebSocket handler
+func (c *Container) initializeWebSocketHandler() error {
+	if !c.config.WebSocket.Enabled {
+		// WebSocket is disabled, skip initialization
+		c.trackInitialization("websocket_handler_disabled")
+		return nil
+	}
 	
-	c.wsHandler = &ServiceStub{Name: "websocket_handler", Initialized: true}
+	// Create WebSocket configuration
+	wsConfig := websocket.Config{
+		MaxConnectionsPerUser: c.config.WebSocket.MaxConnectionsPerUser,
+		AllowedOrigins:        c.config.WebSocket.AllowedOrigins,
+		ReadTimeout:           c.config.WebSocket.ReadTimeout,
+		WriteTimeout:          c.config.WebSocket.WriteTimeout,
+		PingInterval:          c.config.WebSocket.PingInterval,
+	}
+	
+	// Create WebSocket handler
+	wsHandler := websocket.NewHandler(
+		c.jwtService,
+		c.redisService,
+		c.fileManager,
+		c.sessionManager,
+		wsConfig,
+	)
+	
+	c.wsHandler = wsHandler
 	c.trackInitialization("websocket_handler")
+	return nil
+}
+
+// GetWebSocketHandler returns the WebSocket handler instance
+func (c *Container) GetWebSocketHandler() *websocket.Handler {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.wsHandler
 }
 
 // cleanupPartialInitialization cleans up any services that were initialized before failure
 func (c *Container) cleanupPartialInitialization(ctx context.Context) {
 	// Cleanup in reverse dependency order
 	
+	// Cleanup WebSocket handler if it exists
+	if c.wsHandler != nil {
+		c.wsHandler.Shutdown()
+		c.wsHandler = nil
+	}
+	
+	// Cleanup session manager if it exists
+	if c.sessionManager != nil {
+		c.sessionManager.Stop(ctx)
+		c.sessionManager = nil
+	}
+	
 	// Cleanup Redis service if it exists
 	if c.redisService != nil {
-		// In real implementation, would close Redis connection
+		c.redisService.Close()
 		c.redisService = nil
 	}
 	
@@ -174,29 +341,6 @@ func (c *Container) initializeMongoDB(ctx context.Context) error {
 	return nil
 }
 
-// initializeRedis attempts to connect to Redis with the configured settings
-func (c *Container) initializeRedis(ctx context.Context) error {
-	if c.config.Redis.Addr == "" {
-		// Create default Redis service stub when no configuration provided
-		c.redisService = &ServiceStub{Name: "redis_service", Initialized: true}
-		c.trackInitialization("redis")
-		return nil
-	}
-	
-	// For now, simulate Redis connection attempt that will fail with invalid addresses
-	// In a real implementation, this would use go-redis client
-	if strings.Contains(c.config.Redis.Addr, "invalid") {
-		return fmt.Errorf("Redis connection failed: cannot connect to %s", c.config.Redis.Addr)
-	}
-	
-	// Create Redis service stub for valid addresses
-	c.redisService = &ServiceStub{Name: "redis_service", Initialized: true}
-	
-	// Track initialization order
-	c.trackInitialization("redis")
-	
-	return nil
-}
 
 
 // ServiceStub represents a placeholder service for testing
@@ -236,11 +380,15 @@ func (c *Container) Stop(ctx context.Context) error {
 	
 	// Stop application services first (reverse order of initialization)
 	if c.wsHandler != nil {
+		c.wsHandler.Shutdown()
 		c.trackShutdown("websocket_handler")
 		c.wsHandler = nil
 	}
 	
 	if c.sessionManager != nil {
+		if err := c.sessionManager.Stop(ctx); err != nil {
+			errors = append(errors, fmt.Errorf("session manager stop error: %w", err))
+		}
 		c.trackShutdown("session_manager")
 		c.sessionManager = nil
 	}
@@ -262,6 +410,7 @@ func (c *Container) Stop(ctx context.Context) error {
 	
 	// Stop infrastructure services last
 	if c.redisService != nil {
+		c.redisService.Close()
 		c.trackShutdown("redis")
 		c.redisService = nil
 	}
@@ -672,6 +821,7 @@ func (c *Container) GetHealthStatus(ctx context.Context) *HealthStatus {
 	if c.started {
 		details["mongodb_status"] = c.getServiceStatus("mongodb")
 		details["redis_status"] = c.getServiceStatus("redis")
+		details["websocket_status"] = c.getServiceStatus("websocket")
 		details["service_count"] = 7 // Total services initialized
 	}
 	
@@ -721,6 +871,14 @@ func (c *Container) checkIndividualServiceHealth(serviceName string) (bool, stri
 			return true, "service healthy"
 		}
 		return false, "service not available"
+	case "websocket":
+		if c.config.WebSocket.Enabled {
+			if c.wsHandler != nil {
+				return true, "service healthy"
+			}
+			return false, "service not available"
+		}
+		return true, "service disabled"
 	default:
 		return false, "service not found"
 	}
@@ -737,6 +895,14 @@ func (c *Container) getServiceStatus(serviceName string) string {
 		if c.redisService != nil {
 			return "healthy"
 		}
+	case "websocket":
+		if c.config.WebSocket.Enabled {
+			if c.wsHandler != nil {
+				return "healthy"
+			}
+			return "unavailable"
+		}
+		return "disabled"
 	}
 	return "unavailable"
 }

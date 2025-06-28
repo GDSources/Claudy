@@ -48,6 +48,9 @@ type Config struct {
 	
 	// Rate limiting configuration
 	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
+	
+	// WebSocket configuration
+	WebSocket WebSocketConfig `mapstructure:"websocket"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -136,6 +139,18 @@ type RateLimitConfig struct {
 	RequestsPerSecond float64 `mapstructure:"requests_per_second"`
 	BurstSize  int     `mapstructure:"burst_size"`
 	KeyFunc    string  `mapstructure:"key_func"` // "ip", "user", "custom"
+}
+
+// WebSocketConfig holds WebSocket server configuration
+type WebSocketConfig struct {
+	Enabled               bool          `mapstructure:"enabled"`
+	Path                  string        `mapstructure:"path"`
+	MaxConnectionsPerUser int           `mapstructure:"max_connections_per_user"`
+	AllowedOrigins        []string      `mapstructure:"allowed_origins"`
+	ReadTimeout           time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout          time.Duration `mapstructure:"write_timeout"`
+	PingInterval          time.Duration `mapstructure:"ping_interval"`
+	BufferSize            int           `mapstructure:"buffer_size"`
 }
 
 // Load loads configuration from environment variables, .env files, and CLI flags
@@ -233,6 +248,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("claude.max_file_size", 10485760)       // 10MB
 	
 	// Security defaults
+	v.SetDefault("security.encryption_key", "default-32-byte-key-for-dev-only!!") // Default for development
 	v.SetDefault("security.csp_policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
 	v.SetDefault("security.hsts_max_age", 31536000) // 1 year
 	v.SetDefault("security.enable_hsts", true)
@@ -251,6 +267,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rate_limit.requests_per_second", 100.0)
 	v.SetDefault("rate_limit.burst_size", 10)
 	v.SetDefault("rate_limit.key_func", "ip")
+	
+	// WebSocket defaults
+	v.SetDefault("websocket.enabled", true)
+	v.SetDefault("websocket.path", "/ws")
+	v.SetDefault("websocket.max_connections_per_user", 3)
+	v.SetDefault("websocket.allowed_origins", []string{"http://localhost:3000", "https://app.claudy.com"})
+	v.SetDefault("websocket.read_timeout", "60s")
+	v.SetDefault("websocket.write_timeout", "10s")
+	v.SetDefault("websocket.ping_interval", "30s")
+	v.SetDefault("websocket.buffer_size", 1024)
 }
 
 // GetAddr returns the server address in host:port format

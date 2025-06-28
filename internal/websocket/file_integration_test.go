@@ -30,7 +30,7 @@ func TestWebSocketFileUploadIntegration(t *testing.T) {
 
 	// Setup JWT and Redis mocks
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 
@@ -64,20 +64,11 @@ func TestWebSocketFileUploadIntegration(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	conn, server := createTestClient(t, handler, headers, validToken)
 	defer server.Close()
 	defer conn.Close()
 
-	// Send authentication message
-	authMsg := createAuthMessage(validToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
-
-	// Read auth response
-	var authResponse Message
-	err = conn.ReadJSON(&authResponse)
-	require.NoError(t, err)
-	assert.Equal(t, "auth_success", authResponse.Type)
+	// Connection is already authenticated via token in URL, so we can proceed directly
 
 	// Send file upload message
 	fileUploadMsg := Message{
@@ -90,7 +81,7 @@ func TestWebSocketFileUploadIntegration(t *testing.T) {
 			"encoding": "utf-8",
 		},
 	}
-	err = conn.WriteJSON(fileUploadMsg)
+	err := conn.WriteJSON(fileUploadMsg)
 	require.NoError(t, err)
 
 	// Read file upload response
@@ -134,7 +125,7 @@ func TestWebSocketFileListIntegration(t *testing.T) {
 
 	// Setup JWT and Redis mocks
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 
@@ -161,20 +152,11 @@ func TestWebSocketFileListIntegration(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	conn, server := createTestClient(t, handler, headers, validToken)
 	defer server.Close()
 	defer conn.Close()
 
-	// Send authentication message
-	authMsg := createAuthMessage(validToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
-
-	// Read auth response
-	var authResponse Message
-	err = conn.ReadJSON(&authResponse)
-	require.NoError(t, err)
-	assert.Equal(t, "auth_success", authResponse.Type)
+	// Connection is already authenticated via token in URL, so we can proceed directly
 
 	// Send file list request
 	fileListMsg := Message{
@@ -183,7 +165,7 @@ func TestWebSocketFileListIntegration(t *testing.T) {
 		Timestamp: time.Now().Format(time.RFC3339),
 		Data:      map[string]interface{}{},
 	}
-	err = conn.WriteJSON(fileListMsg)
+	err := conn.WriteJSON(fileListMsg)
 	require.NoError(t, err)
 
 	// Read file list response
@@ -237,7 +219,7 @@ func TestWebSocketFileUploadNoSession(t *testing.T) {
 
 	// Setup JWT and Redis mocks
 	mockJWT.On("ValidateToken", validToken).Return(validClaims, nil)
-	mockRedis.On("IsAvailable").Return(true)
+	mockRedis.On("GetConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("IncrementConnectionCount", validClaims.UserID).Return(1, nil)
 	mockRedis.On("DecrementConnectionCount", validClaims.UserID).Return(0, nil)
 
@@ -250,20 +232,11 @@ func TestWebSocketFileUploadNoSession(t *testing.T) {
 	headers := http.Header{
 		"Origin": []string{"http://localhost:3000"},
 	}
-	conn, server := createTestClient(t, handler, headers)
+	conn, server := createTestClient(t, handler, headers, validToken)
 	defer server.Close()
 	defer conn.Close()
 
-	// Send authentication message
-	authMsg := createAuthMessage(validToken)
-	err := conn.WriteJSON(authMsg)
-	require.NoError(t, err)
-
-	// Read auth response
-	var authResponse Message
-	err = conn.ReadJSON(&authResponse)
-	require.NoError(t, err)
-	assert.Equal(t, "auth_success", authResponse.Type)
+	// Connection is already authenticated via token in URL, so we can proceed directly
 
 	// Send file upload message
 	fileUploadMsg := Message{
@@ -276,7 +249,7 @@ func TestWebSocketFileUploadNoSession(t *testing.T) {
 			"encoding": "utf-8",
 		},
 	}
-	err = conn.WriteJSON(fileUploadMsg)
+	err := conn.WriteJSON(fileUploadMsg)
 	require.NoError(t, err)
 
 	// Read error response

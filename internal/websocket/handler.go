@@ -66,6 +66,7 @@ type Config struct {
 type Connection struct {
 	conn          *websocket.Conn
 	userID        string
+	userClaims    *auth.UserClaims
 	authenticated bool
 	send          chan Message
 	handler       *Handler
@@ -120,6 +121,63 @@ func NewHandler(jwtService JWTService, redisService RedisService, fileManager Fi
 
 // HandleWebSocket handles WebSocket connection requests
 func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Pre-upgrade origin validation
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		log.Printf("WebSocket origin validation failed: no origin header")
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	
+	originAllowed := false
+	for _, allowedOrigin := range h.config.AllowedOrigins {
+		if origin == allowedOrigin {
+			originAllowed = true
+			break
+		}
+	}
+	
+	if !originAllowed {
+		log.Printf("WebSocket origin validation failed: origin not allowed: %s", origin)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	
+	// Pre-upgrade authentication validation
+	var userClaims *auth.UserClaims
+	var err error
+	
+	// Extract JWT token from Authorization header or query parameter
+	token := extractToken(r)
+	if token == "" {
+		log.Printf("WebSocket authentication failed: no token provided")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	userClaims, err = h.jwtService.ValidateToken(token)
+	if err != nil {
+		log.Printf("WebSocket authentication failed: %v", err)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate connection limits before upgrade (if authenticated)
+	if userClaims != nil {
+		connectionCount, err := h.redisService.GetConnectionCount(userClaims.UserID)
+		if err != nil {
+			log.Printf("Failed to check connection count: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		
+		if connectionCount >= h.config.MaxConnectionsPerUser {
+			log.Printf("User %s exceeded connection limit", userClaims.UserID)
+			http.Error(w, "Connection limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+	}
+	
 	// Upgrade HTTP connection to WebSocket
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -130,7 +188,9 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Create connection wrapper
 	wsConn := &Connection{
 		conn:          conn,
-		authenticated: false,
+		userID:        getUserID(userClaims),
+		userClaims:    userClaims,
+		authenticated: userClaims != nil,
 		send:          make(chan Message, 256),
 		handler:       h,
 	}
@@ -138,6 +198,14 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Set connection timeouts
 	conn.SetReadDeadline(time.Now().Add(h.config.ReadTimeout))
 	conn.SetWriteDeadline(time.Now().Add(h.config.WriteTimeout))
+
+	// Increment connection count if authenticated
+	if wsConn.authenticated && wsConn.userID != "" {
+		_, err := h.redisService.IncrementConnectionCount(wsConn.userID)
+		if err != nil {
+			log.Printf("Failed to increment connection count for user %s: %v", wsConn.userID, err)
+		}
+	}
 
 	// Start connection handlers
 	go wsConn.readPump()
@@ -551,4 +619,40 @@ func (h *Handler) UpdateRedisService(redisService RedisService) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	h.redisService = redisService
+}
+
+// extractToken extracts JWT token from Authorization header or query parameter
+func extractToken(r *http.Request) string {
+	// Try Authorization header first (Bearer token)
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		// Check for "Bearer " prefix
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			return strings.TrimPrefix(authHeader, "Bearer ")
+		}
+		// Also accept token without Bearer prefix
+		return authHeader
+	}
+	
+	// Try query parameter as fallback (for WebSocket clients that can't set headers)
+	token := r.URL.Query().Get("token")
+	if token != "" {
+		return token
+	}
+	
+	// Try access_token query parameter (OAuth-style)
+	accessToken := r.URL.Query().Get("access_token")
+	if accessToken != "" {
+		return accessToken
+	}
+	
+	return ""
+}
+
+// getUserID extracts user ID from user claims, returns empty string if no claims
+func getUserID(userClaims *auth.UserClaims) string {
+	if userClaims == nil {
+		return ""
+	}
+	return userClaims.UserID
 }

@@ -1,0 +1,85 @@
+# Docker Compose override file for development-specific configurations
+# This file automatically extends docker-compose.yml in development
+version: '3.8'
+
+services:
+  app:
+    # Development-specific environment variables
+    environment:
+      - GO_ENV=development
+      - LOG_LEVEL=debug
+      - ENABLE_PPROF=true
+      - ENABLE_REQUEST_LOGGING=true
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000
+      - RATE_LIMIT_ENABLED=false  # Disable rate limiting in development
+      - SECURITY_ENABLE_HSTS=false  # Disable HSTS in development
+      - MONITORING_ENABLED=true
+    # Additional development volumes
+    volumes:
+      - ./tmp:/app/tmp:cached                      # Mount tmp directory for Air
+      - ./scripts:/app/scripts:ro                  # Mount development scripts
+      - ~/.gitconfig:/home/claudy/.gitconfig:ro    # Mount git config
+    # Development-specific labels
+    labels:
+      - "com.claudy.env=development"
+      - "com.claudy.service=backend"
+    # Override command for development with verbose logging
+    command: ["sh", "-c", "air -c .air.toml"]
+
+  mongo:
+    # Development-specific MongoDB configuration
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: devpassword
+      MONGO_INITDB_DATABASE: claudy_dev
+    # Additional development volumes
+    volumes:
+      - ./docker/mongo-dev.conf:/etc/mongod.conf:ro
+    # Development-specific MongoDB settings
+    command: ["mongod", "--auth", "--bind_ip_all", "--replSet", "rs0"]
+    labels:
+      - "com.claudy.env=development"
+      - "com.claudy.service=database"
+
+  redis:
+    # Development-specific Redis configuration
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --loglevel debug
+    labels:
+      - "com.claudy.env=development"
+      - "com.claudy.service=cache"
+
+  # Development-specific additional services
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: claudy-mailhog-dev
+    restart: unless-stopped
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    networks:
+      - claudy-network
+    labels:
+      - "com.claudy.env=development"
+      - "com.claudy.service=mail"
+
+  # Development file watcher for additional tooling
+  docs:
+    image: nginx:alpine
+    container_name: claudy-docs-dev
+    restart: unless-stopped
+    ports:
+      - "8083:80"
+    volumes:
+      - ./docs:/usr/share/nginx/html:ro
+      - ./docker/nginx-docs.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - claudy-network
+    labels:
+      - "com.claudy.env=development"
+      - "com.claudy.service=docs"

@@ -35,7 +35,7 @@ services:
     volumes:
       - ./docker/mongo-dev.conf:/etc/mongod.conf:ro
     # Development-specific MongoDB settings
-    command: ["mongod", "--auth", "--bind_ip_all", "--replSet", "rs0"]
+    command: ["mongod", "--auth", "--bind_ip_all"]
     labels:
       - "com.claudy.env=development"
       - "com.claudy.service=database"

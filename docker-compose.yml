@@ -1,5 +1,4 @@
 # Docker Compose configuration for Claudy development environment
-version: '3.8'
 
 services:
   # Claudy Backend Application
@@ -7,7 +6,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
-      target: development
     container_name: claudy-backend-dev
     restart: unless-stopped
     ports:

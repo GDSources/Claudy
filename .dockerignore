@@ -95,7 +95,6 @@ Desktop.ini
 
 # Development specific
 scripts/
-.air.toml
 
 # Test keys (will be copied explicitly)
 test_keys/
